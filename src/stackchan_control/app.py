@@ -1,19 +1,43 @@
 from __future__ import annotations
 
+import asyncio
+import secrets
+import time
 from typing import Annotated
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import FileResponse
 
+from .gateway import (
+    DeviceOfflineError,
+    MessageType,
+    ProtocolError,
+    StackChanGateway,
+    unpack_frame,
+)
 from .repository import ConflictError, NotFoundError, RepositoryError, RobotRepository
 from .schemas import (
     CharacterVersion,
     CharacterVersionCreate,
+    DeviceState,
     DisplayState,
     MemoryCreate,
     MemoryItem,
     PromptPreview,
+    RobotExpressionCommand,
+    RobotMotionCommand,
+    RobotTextCommand,
     RollbackRequest,
     TaskItem,
     TaskReport,
@@ -23,19 +47,79 @@ from .schemas import (
 from .settings import Settings
 
 
+EXPRESSION_PROFILES = {
+    "neutral": {"weight": 100, "left_rotation": 0, "right_rotation": 0},
+    "happy": {"weight": 72, "left_rotation": 1550, "right_rotation": -1550},
+    "angry": {"weight": 70, "left_rotation": 450, "right_rotation": -450},
+    "sad": {"weight": 70, "left_rotation": -400, "right_rotation": 400},
+    "doubt": {"weight": 75, "left_rotation": 0, "right_rotation": 0},
+    "sleepy": {"weight": 35, "left_rotation": -50, "right_rotation": 50},
+}
+DISPLAY_EMOTIONS = {
+    "neutral": "neutral",
+    "happy": "happy",
+    "excited": "happy",
+    "thinking": "doubt",
+    "focused": "doubt",
+    "concerned": "sad",
+    "apologetic": "sad",
+    "task_running": "doubt",
+    "task_complete": "happy",
+    "task_failed": "sad",
+}
+
+
+def expression_payload(emotion: str, mouth_weight: int | None = None) -> dict[str, object]:
+    profile = EXPRESSION_PROFILES[emotion]
+    payload: dict[str, object] = {
+        "leftEye": {
+            "weight": profile["weight"],
+            "rotation": profile["left_rotation"],
+        },
+        "rightEye": {
+            "weight": profile["weight"],
+            "rotation": profile["right_rotation"],
+        },
+    }
+    if mouth_weight is not None:
+        payload["mouth"] = {"weight": mouth_weight}
+    return payload
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     current_settings = settings or Settings.from_env()
+    if current_settings.host not in {"127.0.0.1", "localhost", "::1"} and not (
+        current_settings.admin_api_key
+    ):
+        raise RuntimeError("ROBOT_ADMIN_API_KEY is required when listening on the LAN")
     repository = RobotRepository(
         current_settings.db_path, current_settings.seed_character_dir
     )
+    gateway = StackChanGateway(current_settings.device_id)
 
     app = FastAPI(
         title="StackChan Family Robot Control API",
-        version="0.1.0",
-        description="Local-first character, memory, task and display control plane.",
+        version="0.2.0",
+        description="Local-first control plane and StackChan LAN gateway.",
     )
     app.state.settings = current_settings
     app.state.repository = repository
+    app.state.gateway = gateway
+
+    async def sync_display_to_device() -> None:
+        display = repository.display_state()
+        emotion = DISPLAY_EMOTIONS.get(str(display["emotion"]), "neutral")
+        await gateway.send_json(
+            MessageType.CONTROL_AVATAR,
+            expression_payload(emotion),
+        )
+        content = str(display["title"])
+        if display["subtitle"]:
+            content = f"{content}：{display['subtitle']}"
+        await gateway.send_json(
+            MessageType.TEXT_MESSAGE,
+            {"name": display["source"] or "任务状态", "content": content[:240]},
+        )
 
     def repo(request: Request) -> RobotRepository:
         return request.app.state.repository
@@ -45,8 +129,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_robot_admin_key: Annotated[str | None, Header()] = None,
     ) -> None:
         expected = request.app.state.settings.admin_api_key
-        if expected and x_robot_admin_key != expected:
+        if expected and (
+            not x_robot_admin_key
+            or not secrets.compare_digest(x_robot_admin_key, expected)
+        ):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid admin key")
+
+    def require_device(
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> None:
+        expected = request.app.state.settings.device_api_key
+        if not expected or not authorization or not secrets.compare_digest(
+            authorization, expected
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid device key",
+            )
 
     @app.exception_handler(NotFoundError)
     async def not_found_handler(_: Request, exc: NotFoundError):
@@ -60,6 +160,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def repository_handler(_: Request, exc: RepositoryError):
         return _json_error(422, str(exc))
 
+    @app.exception_handler(DeviceOfflineError)
+    async def device_offline_handler(_: Request, exc: DeviceOfflineError):
+        return _json_error(409, str(exc))
+
     @app.get("/", include_in_schema=False)
     def admin_page() -> FileResponse:
         return FileResponse(current_settings.web_dir / "index.html")
@@ -69,9 +173,155 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "ok": True,
             "service": "stackchan-control",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "local_first": True,
+            "device_gateway_auth_configured": bool(current_settings.device_api_key),
         }
+
+    @app.websocket("/stackChan/ws")
+    async def stackchan_websocket(websocket: WebSocket) -> None:
+        expected = current_settings.device_api_key
+        provided = websocket.headers.get("authorization")
+        if not expected or not provided or not secrets.compare_digest(provided, expected):
+            await websocket.close(code=1008, reason="invalid device key")
+            return
+
+        device_type = websocket.query_params.get("deviceType")
+        if device_type != "StackChan":
+            await websocket.close(code=1008, reason="invalid device type")
+            return
+
+        device_id = websocket.query_params.get("deviceId", current_settings.device_id)
+        if device_id != current_settings.device_id:
+            await websocket.close(code=1008, reason="unknown device")
+            return
+
+        await websocket.accept()
+        session = await gateway.register(device_id, websocket)
+        try:
+            while True:
+                try:
+                    message = await asyncio.wait_for(
+                        websocket.receive(),
+                        timeout=current_settings.gateway_heartbeat_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    if (
+                        time.monotonic() - session.last_pong_monotonic
+                        > current_settings.gateway_timeout_seconds
+                    ):
+                        await websocket.close(code=1001, reason="heartbeat timeout")
+                        break
+                    await gateway.send(MessageType.HEARTBEAT_PING, device_id=device_id)
+                    continue
+
+                if message["type"] == "websocket.disconnect":
+                    break
+                binary = message.get("bytes")
+                if binary is not None:
+                    try:
+                        frame = unpack_frame(binary)
+                    except ProtocolError:
+                        await websocket.close(code=1003, reason="invalid binary frame")
+                        break
+                    await gateway.record_frame(session, frame)
+                elif message.get("text") is not None:
+                    await gateway.record_text(session)
+        except (WebSocketDisconnect, DeviceOfflineError, asyncio.CancelledError):
+            pass
+        finally:
+            await gateway.disconnect(session)
+
+    @app.get(
+        "/stackChan/device/user",
+        dependencies=[Depends(require_device)],
+    )
+    def stackchan_user() -> dict[str, object]:
+        return {"code": 0, "data": {"username": "Local Family"}}
+
+    @app.get(
+        "/stackChan/device/info",
+        dependencies=[Depends(require_device)],
+    )
+    def stackchan_info() -> dict[str, object]:
+        return {"code": 0, "data": {"name": "StackChan Family"}}
+
+    @app.post(
+        "/stackChan/device/unbind",
+        dependencies=[Depends(require_device)],
+    )
+    def stackchan_unbind() -> dict[str, object]:
+        return {"code": 0, "data": None}
+
+    @app.get("/stackChan/apps")
+    def stackchan_apps() -> dict[str, object]:
+        return {"code": 0, "data": []}
+
+    @app.api_route("/v1/device/ota/check", methods=["GET", "POST"])
+    def ota_check() -> dict[str, object]:
+        return {"firmware": {"version": "1.4.3", "url": ""}}
+
+    @app.get(
+        "/v1/device/state",
+        response_model=DeviceState,
+        dependencies=[Depends(require_admin)],
+    )
+    async def device_state() -> dict[str, object]:
+        return await gateway.snapshot()
+
+    @app.post(
+        "/v1/device/motion",
+        response_model=DeviceState,
+        dependencies=[Depends(require_admin)],
+    )
+    async def device_motion(body: RobotMotionCommand) -> dict[str, object]:
+        await gateway.send_json(
+            MessageType.CONTROL_MOTION,
+            {
+                "yawServo": {
+                    "angle": round(body.yaw_degrees * 10),
+                    "speed": body.speed,
+                },
+                "pitchServo": {
+                    "angle": round(body.pitch_degrees * 10),
+                    "speed": body.speed,
+                },
+            },
+        )
+        return await gateway.snapshot()
+
+    @app.post(
+        "/v1/device/expression",
+        response_model=DeviceState,
+        dependencies=[Depends(require_admin)],
+    )
+    async def device_expression(body: RobotExpressionCommand) -> dict[str, object]:
+        await gateway.send_json(
+            MessageType.CONTROL_AVATAR,
+            expression_payload(body.emotion, body.mouth_weight),
+        )
+        return await gateway.snapshot()
+
+    @app.post(
+        "/v1/device/text",
+        response_model=DeviceState,
+        dependencies=[Depends(require_admin)],
+    )
+    async def device_text(body: RobotTextCommand) -> dict[str, object]:
+        await gateway.send_json(
+            MessageType.TEXT_MESSAGE,
+            {"name": body.name, "content": body.content},
+        )
+        return await gateway.snapshot()
+
+    @app.post(
+        "/v1/device/display/sync",
+        response_model=DeviceState,
+        dependencies=[Depends(require_admin)],
+    )
+    async def sync_device_display() -> dict[str, object]:
+        await sync_display_to_device()
+        return await gateway.snapshot()
 
     @app.get(
         "/v1/users",
@@ -212,10 +462,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response_model=TaskItem,
         dependencies=[Depends(require_admin)],
     )
-    def report_task(
+    async def report_task(
         body: TaskReport, repository: RobotRepository = Depends(repo)
     ):
-        return repository.report_task(body.model_dump())
+        item = repository.report_task(body.model_dump())
+        try:
+            await sync_display_to_device()
+        except DeviceOfflineError:
+            pass
+        return item
 
     @app.get("/v1/display/state", response_model=DisplayState)
     def display_state(repository: RobotRepository = Depends(repo)):

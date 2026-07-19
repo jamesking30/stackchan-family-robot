@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from ipaddress import ip_address
@@ -60,7 +61,11 @@ def verify_image(path: Path) -> None:
     )
     require(result.returncode == 0, f"esptool rejected {path.name}: {result.stderr.strip()}")
     require("Detected image type: ESP32-S3" in result.stdout, f"{path.name} is not ESP32-S3")
-    require("Validation Hash:" in result.stdout and "(valid)" in result.stdout, f"{path.name} hash is invalid")
+    output_lower = result.stdout.lower()
+    require(
+        "validation hash:" in output_lower and "(valid)" in output_lower,
+        f"{path.name} hash is invalid",
+    )
 
 
 def main() -> int:
@@ -122,14 +127,44 @@ def main() -> int:
     if not server_is_lan:
         deployment_blockers.append("upstream server URL has not been replaced by the local Mac gateway")
 
+    product_config_path = build_dir / "product-config.json"
+    device_auth: dict[str, str] | None = None
+    if not product_config_path.is_file():
+        deployment_blockers.append("device authentication override is not part of this baseline build")
+    else:
+        product_config = json.loads(product_config_path.read_text(encoding="utf-8"))
+        require(product_config.get("schema_version") == 1, "unsupported product config schema")
+        require(product_config.get("gateway_url") == server_url, "product gateway URL differs from sdkconfig")
+        ota_line = next(
+            (line for line in config_lines if line.startswith('CONFIG_OTA_URL="')),
+            "",
+        )
+        ota_url = ota_line.partition("=")[2].strip('"')
+        require(product_config.get("ota_url") == ota_url, "product OTA URL differs from sdkconfig")
+        auth = product_config.get("device_auth")
+        require(isinstance(auth, dict), "product device auth metadata is missing")
+        require(auth.get("mode") == "generated-build-secret", "unexpected device auth mode")
+        token_sha256 = auth.get("token_sha256", "")
+        require(
+            isinstance(token_sha256, str) and re.fullmatch(r"[0-9a-f]{64}", token_sha256),
+            "invalid device key fingerprint",
+        )
+        require(
+            "product_overlay" in project.get("build_components", []),
+            "device authentication override component was not linked",
+        )
+        require(bool(product_config.get("device_id")), "product device id is missing")
+        device_auth = {"mode": auth["mode"], "token_sha256": token_sha256}
+
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "board": "m5stack-stack-chan",
         "target": "esp32s3",
         "public_baseline_version": project["project_version"],
         "deployment_ready": not deployment_blockers,
         "deployment_blockers": deployment_blockers,
         "gateway_host": server_host,
+        "device_auth": device_auth,
         "flash_settings": flash_args["flash_settings"],
         "artifacts": artifacts,
     }

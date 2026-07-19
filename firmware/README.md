@@ -34,6 +34,15 @@ source ./scripts/firmware_env.sh
 
 公共上游源码的项目版本是 `1.4.3`；当前真机出厂镜像是 `1.4.4`。因此本构建用于可审计的硬件/BSP 基线，不能被描述为出厂 `1.4.4` 的逐字节复现。基线仍包含上游服务地址，校验清单会将其标记为 `deployment_ready: false`；接入 Mac 本地网关前不得刷写真机。
 
+面向本项目的局域网产品构建使用：
+
+```bash
+./scripts/bootstrap_local_env.py  # 仅首次运行
+./scripts/build_product_firmware.sh --gateway-host 192.168.31.65
+```
+
+产品构建不会修改上游子模块，也不会自动刷机。生成的设备密钥、固件配置和镜像位于 Git 忽略目录；清单只包含密钥指纹。当前 Mac 网关与产品固件流程见 `docs/m1-local-gateway.md`。
+
 ## 刷机前门禁
 
 1. 拍照或记录主控型号、StackChan 套件版本、舵机型号与接线。

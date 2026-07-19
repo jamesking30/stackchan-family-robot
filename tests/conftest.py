@@ -28,3 +28,18 @@ def protected_client(tmp_path: Path):
     )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def gateway_client(tmp_path: Path):
+    settings = Settings(
+        db_path=tmp_path / "gateway.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        admin_api_key="admin-secret",
+        device_api_key="device-secret",
+        gateway_heartbeat_seconds=0.03,
+        gateway_timeout_seconds=0.2,
+    )
+    with TestClient(create_app(settings)) as test_client:
+        yield test_client

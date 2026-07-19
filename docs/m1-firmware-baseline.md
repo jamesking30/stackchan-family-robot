@@ -46,6 +46,8 @@
 - 当前应用大小为 `0x39c4e0` 字节，OTA 应用分区剩余约 27%。
 - 上游服务地址尚未切换为 Mac 本地网关，因此清单明确标记 `deployment_ready: false`。
 
+上述结果对应原始公共基线。产品构建使用 `scripts/build_product_firmware.sh`，将服务和 OTA 地址切换为 Mac 局域网网关，链接设备鉴权覆盖组件，并在独立输出目录生成可部署清单；详细流程见 `docs/m1-local-gateway.md`。
+
 `sdkconfig` 选择 QIO 并启用启动时自动探测；ESP-IDF 因此在写入参数中保守使用 DIO 头部，Bootloader 启动后再探测并切换。该行为与真机读取到的 QIO Flash 模式不冲突。
 
 ## 已知差异

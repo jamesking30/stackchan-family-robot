@@ -116,3 +116,29 @@ class DisplayState(BaseModel):
     progress: float | None = None
     source: str | None = None
     task_id: str | None = None
+
+
+class DeviceState(BaseModel):
+    device_id: str
+    online: bool
+    connected_at: datetime | None = None
+    last_seen: datetime | None = None
+    frames_received: int = 0
+    frames_sent: int = 0
+    last_message_type: int | None = None
+
+
+class RobotMotionCommand(BaseModel):
+    yaw_degrees: float = Field(ge=-45, le=45)
+    pitch_degrees: float = Field(ge=0, le=45)
+    speed: int = Field(default=150, ge=100, le=500)
+
+
+class RobotExpressionCommand(BaseModel):
+    emotion: Literal["neutral", "happy", "angry", "sad", "doubt", "sleepy"]
+    mouth_weight: int | None = Field(default=None, ge=0, le=100)
+
+
+class RobotTextCommand(BaseModel):
+    name: str = Field(default="家庭助手", min_length=1, max_length=40)
+    content: str = Field(min_length=1, max_length=240)
