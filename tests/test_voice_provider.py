@@ -5,7 +5,10 @@ import httpx
 import pytest
 
 from stackchan_control.settings import PROJECT_ROOT, Settings
-from stackchan_control.voice import LocalDeepSeekVoiceProvider
+from stackchan_control.voice import (
+    LocalDeepSeekVoiceProvider,
+    NoSpeechDetected,
+)
 
 
 class FakeDeepSeekClient:
@@ -62,3 +65,16 @@ def test_deepseek_text_provider_uses_v4_without_thinking(
         "max_tokens": 240,
         "stream": False,
     }
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "[BLANK_AUDIO]", "MBC 뉴스 이덕영입니다.", "(字幕製作:貝爾)"],
+)
+def test_local_whisper_rejects_silence_and_out_of_scope_hallucinations(text: str):
+    with pytest.raises(NoSpeechDetected):
+        LocalDeepSeekVoiceProvider._clean_transcript(text)
+
+
+def test_local_whisper_accepts_chinese_and_english():
+    assert LocalDeepSeekVoiceProvider._clean_transcript("  你好， StackChan  ") == "你好， StackChan"

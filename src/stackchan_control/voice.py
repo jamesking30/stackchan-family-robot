@@ -29,6 +29,10 @@ class VoiceError(RuntimeError):
     pass
 
 
+class NoSpeechDetected(VoiceError):
+    pass
+
+
 class VoiceMode(str, Enum):
     STOPPED = "stopped"
     LISTENING = "listening"
@@ -75,38 +79,53 @@ class LocalDeepSeekVoiceProvider:
         with tempfile.TemporaryDirectory(prefix="stackchan-whisper-") as temp_dir:
             temp_path = Path(temp_dir)
             input_path = temp_path / "utterance.wav"
-            output_path = temp_path / "transcript"
             input_path.write_bytes(wav_audio)
-            process = await asyncio.create_subprocess_exec(
-                self.whisper_binary,
-                "-m",
-                str(self.whisper_model),
-                "-f",
-                str(input_path),
-                "-l",
-                "auto",
-                "-t",
-                "6",
-                "-otxt",
-                "-of",
-                str(output_path),
-                "-np",
-                "-nt",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-            if process.returncode != 0:
-                detail = stderr.decode("utf-8", errors="replace").strip()[-240:]
-                raise VoiceError(f"local Whisper failed: {detail or process.returncode}")
-            transcript_file = output_path.with_suffix(".txt")
-            if transcript_file.is_file():
-                text = transcript_file.read_text(encoding="utf-8").strip()
-            else:
-                text = stdout.decode("utf-8", errors="replace").strip()
-        if not text:
-            raise VoiceError("local Whisper returned no text")
-        return text
+            for language in ("auto", "zh", "en"):
+                output_path = temp_path / f"transcript-{language}"
+                process = await asyncio.create_subprocess_exec(
+                    self.whisper_binary,
+                    "-m",
+                    str(self.whisper_model),
+                    "-f",
+                    str(input_path),
+                    "-l",
+                    language,
+                    "-t",
+                    "6",
+                    "-otxt",
+                    "-of",
+                    str(output_path),
+                    "-np",
+                    "-nt",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+                if process.returncode != 0:
+                    detail = stderr.decode("utf-8", errors="replace").strip()[-240:]
+                    raise VoiceError(f"local Whisper failed: {detail or process.returncode}")
+                transcript_file = output_path.with_suffix(".txt")
+                if transcript_file.is_file():
+                    text = transcript_file.read_text(encoding="utf-8").strip()
+                else:
+                    text = stdout.decode("utf-8", errors="replace").strip()
+                try:
+                    return self._clean_transcript(text)
+                except NoSpeechDetected:
+                    continue
+        raise NoSpeechDetected("no Chinese or English speech detected")
+
+    @staticmethod
+    def _clean_transcript(text: str) -> str:
+        compact = re.sub(r"\s+", " ", text).strip()
+        if (
+            not compact
+            or compact.upper() in {"[BLANK_AUDIO]", "[NO SPEECH]", "(BLANK AUDIO)"}
+            or re.search(r"[\uac00-\ud7af]", compact)
+            or re.search(r"字幕.{0,4}(製作|制作|提供)", compact)
+        ):
+            raise NoSpeechDetected("no Chinese or English speech detected")
+        return compact
 
     async def answer(self, instructions: str, transcript: str) -> str:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -318,6 +337,8 @@ class VoiceState:
     transcript: str | None = None
     response_text: str | None = None
     error: str | None = None
+    audio_rms: int = 0
+    audio_peak_rms: int = 0
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def snapshot(self) -> dict[str, object]:
@@ -329,6 +350,8 @@ class VoiceState:
             "transcript": self.transcript,
             "response_text": self.response_text,
             "error": self.error,
+            "audio_rms": self.audio_rms,
+            "audio_peak_rms": self.audio_peak_rms,
             "updated_at": self.updated_at,
         }
 
@@ -354,6 +377,7 @@ class VoiceSessionManager:
         self._utterance: list[bytes] = []
         self._speaking_detected = False
         self._silence_ms = 0
+        self._ignore_audio_until = 0.0
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
@@ -378,7 +402,12 @@ class VoiceSessionManager:
             self.state.user_id = target_user
             self._set_mode(VoiceMode.LISTENING)
             self.state.error = None
+            self.state.transcript = None
+            self.state.response_text = None
+            self.state.audio_rms = 0
+            self.state.audio_peak_rms = 0
             self._clear_audio()
+            self._ignore_audio_until = time.monotonic() + 0.35
         try:
             await self.gateway.send(MessageType.START_AUDIO_STREAM)
         except DeviceOfflineError:
@@ -394,6 +423,7 @@ class VoiceSessionManager:
                 self._task.cancel()
             self._task = None
             self._clear_audio()
+            self.state.error = None
             self._set_mode(VoiceMode.STOPPED)
         if await self.gateway.is_online():
             await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
@@ -409,6 +439,7 @@ class VoiceSessionManager:
         if self.state.enabled and await self.gateway.is_online():
             await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
             await self.gateway.send(MessageType.START_AUDIO_STREAM)
+            self._ignore_audio_until = time.monotonic() + 0.5
         return self.state.snapshot()
 
     async def on_device_connected(self) -> None:
@@ -428,15 +459,17 @@ class VoiceSessionManager:
         self._set_mode(VoiceMode.STOPPED)
 
     async def ingest_opus(self, payload: bytes) -> None:
-        if not self.state.enabled or self.state.mode not in {VoiceMode.LISTENING, VoiceMode.SPEAKING}:
+        if not self.state.enabled or self.state.mode != VoiceMode.LISTENING:
+            return
+        if time.monotonic() < self._ignore_audio_until:
             return
         self._ensure_codec()
         assert self.codec is not None
         pcm = self.codec.decode_microphone(payload)
         self._pre_roll.append(pcm)
-        if self.state.mode == VoiceMode.SPEAKING:
-            return
         rms = audioop.rms(pcm, 2)
+        self.state.audio_rms = rms
+        self.state.audio_peak_rms = max(self.state.audio_peak_rms, rms)
         if rms >= 350:
             if not self._speaking_detected:
                 self._utterance.extend(self._pre_roll)
@@ -453,13 +486,10 @@ class VoiceSessionManager:
             self._finish_utterance()
 
     async def voice_activity(self, speaking: bool) -> None:
-        if not self.state.enabled:
-            return
-        if speaking and self.state.mode == VoiceMode.SPEAKING:
-            await self.interrupt()
-            return
-        if not speaking and self._speaking_detected:
-            self._finish_utterance()
+        # The CoreS3 WebRTC VAD can end a phrase between Chinese syllables.
+        # Host-side energy VAD owns phrase boundaries; the device event remains
+        # protocol-compatible telemetry only until acoustic echo cancellation lands.
+        return
 
     async def submit_text(self, transcript: str) -> dict[str, object]:
         self._ensure_codec()
@@ -468,6 +498,8 @@ class VoiceSessionManager:
         if self._task and not self._task.done():
             raise VoiceError("a voice turn is already running")
         self.state.turn_id += 1
+        self.state.response_text = None
+        self.state.error = None
         self._task = asyncio.create_task(self._run_turn(transcript.strip(), None))
         await self._task
         return self.state.snapshot()
@@ -478,12 +510,17 @@ class VoiceSessionManager:
         self._clear_audio()
         if duration_ms < self.settings.voice_min_speech_ms or not pcm:
             return
+        pcm = self._normalize_pcm(pcm)
         if self._task and not self._task.done():
             return
         self.state.turn_id += 1
+        self.state.transcript = None
+        self.state.response_text = None
+        self.state.error = None
         self._task = asyncio.create_task(self._run_turn(None, pcm))
 
     async def _run_turn(self, transcript: str | None, pcm: bytes | None) -> None:
+        microphone_paused = False
         try:
             self._ensure_provider()
             assert self.provider is not None
@@ -496,6 +533,9 @@ class VoiceSessionManager:
             answer = await self.provider.answer(instructions, transcript)
             self.state.response_text = answer
             self._set_mode(VoiceMode.SPEAKING)
+            await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
+            microphone_paused = True
+            self._clear_audio()
             await self.gateway.send_json(
                 MessageType.TEXT_MESSAGE,
                 {"name": "小栈", "content": answer[:240]},
@@ -504,15 +544,36 @@ class VoiceSessionManager:
             assert self.codec is not None
             for packet in self.codec.encode_speech(speech_pcm):
                 await self.gateway.send(MessageType.OPUS, packet)
-                await asyncio.sleep(0.055)
+                await asyncio.sleep(0.06)
+            await asyncio.sleep(0.24)
+            if self.state.enabled and await self.gateway.is_online():
+                self._clear_audio()
+                await self.gateway.send(MessageType.START_AUDIO_STREAM)
+                self._ignore_audio_until = time.monotonic() + 1.2
+                microphone_paused = False
             self.state.error = None
             self._set_mode(VoiceMode.LISTENING if self.state.enabled else VoiceMode.STOPPED)
         except asyncio.CancelledError:
             self._set_mode(VoiceMode.LISTENING if self.state.enabled else VoiceMode.STOPPED)
             raise
+        except NoSpeechDetected:
+            self.state.transcript = None
+            self.state.response_text = None
+            self.state.error = None
+            self._clear_audio()
+            self._ignore_audio_until = time.monotonic() + 0.5
+            self._set_mode(VoiceMode.LISTENING if self.state.enabled else VoiceMode.STOPPED)
         except Exception as exc:
             self.state.error = str(exc)[:240]
             self._set_mode(VoiceMode.ERROR)
+        finally:
+            if microphone_paused and self.state.enabled and await self.gateway.is_online():
+                self._clear_audio()
+                try:
+                    await self.gateway.send(MessageType.START_AUDIO_STREAM)
+                    self._ignore_audio_until = time.monotonic() + 1.2
+                except DeviceOfflineError:
+                    pass
 
     def _instructions(self) -> str:
         preview = self.repository.prompt_preview()
@@ -537,6 +598,17 @@ class VoiceSessionManager:
         self._utterance.clear()
         self._speaking_detected = False
         self._silence_ms = 0
+
+    @staticmethod
+    def _normalize_pcm(pcm: bytes) -> bytes:
+        if not pcm:
+            return pcm
+        centered = audioop.bias(pcm, 2, -audioop.avg(pcm, 2))
+        peak = audioop.max(centered, 2)
+        if peak < 100:
+            return centered
+        gain = min(12.0, 24000 / peak)
+        return audioop.mul(centered, 2, gain)
 
     @staticmethod
     def _wav(pcm: bytes) -> bytes:

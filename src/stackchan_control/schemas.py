@@ -162,4 +162,6 @@ class VoiceStateResponse(BaseModel):
     transcript: str | None = None
     response_text: str | None = None
     error: str | None = None
+    audio_rms: int = 0
+    audio_peak_rms: int = 0
     updated_at: datetime
