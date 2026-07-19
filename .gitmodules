@@ -1,0 +1,3 @@
+[submodule "firmware/upstream/stackchan"]
+	path = firmware/upstream/stackchan
+	url = https://github.com/m5stack/StackChan.git

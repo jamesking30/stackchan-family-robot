@@ -8,7 +8,31 @@
 - 硬件/BSP 基线：[m5stack/StackChan](https://github.com/m5stack/StackChan)（MIT），用于官方板卡驱动、OTA、音频、相机、舵机、触摸和 LED。
 - 主机侧基线：[uezo/aiavatarkit](https://github.com/uezo/aiavatarkit)（Apache-2.0）。
 
-本仓库暂不复制这些上游代码。官方仓库提交 `b72b3ede` 已确认包含与真机匹配的板级实现和分区表；后续以锁定提交的 fork/submodule 方式引入，并保留上游许可证与修改记录。
+官方固件已通过 Git submodule 引入到 `firmware/upstream/stackchan`，锁定提交为 `b72b3ede`。该提交包含与真机匹配的板级实现和分区表。所有直接依赖、官方补丁和 ESP-IDF 版本记录在 `firmware/source-lock.json`，上游许可证和历史保持完整。
+
+## 本地构建
+
+主机工具链基线：
+
+- ESP-IDF `v5.5.4`，提交 `735507283d5b2f9fb363a1901172dbd9e847945d`
+- ESP32-S3 GCC `14.2.0`
+- CMake `>=3.16` 和 Ninja
+
+默认期望 ESP-IDF 安装在 `~/.espressif/frameworks/esp-idf-v5.5.4`。若位置不同，设置 `STACKCHAN_IDF_ROOT`。
+
+```bash
+./scripts/install_firmware_toolchain.sh
+./scripts/prepare_firmware.sh
+./scripts/build_firmware.sh
+```
+
+构建产物写入 `var/firmware-build/m5stack-stack-chan-b72b3ede`，不会污染固件子模块，也不会自动刷机。构建结束后会自动检查板型、Flash 参数、分区表、镜像哈希和分区容量，并生成 `firmware-manifest.json`。需要直接使用 `idf.py` 时，可先执行：
+
+```bash
+source ./scripts/firmware_env.sh
+```
+
+公共上游源码的项目版本是 `1.4.3`；当前真机出厂镜像是 `1.4.4`。因此本构建用于可审计的硬件/BSP 基线，不能被描述为出厂 `1.4.4` 的逐字节复现。基线仍包含上游服务地址，校验清单会将其标记为 `deployment_ready: false`；接入 Mac 本地网关前不得刷写真机。
 
 ## 刷机前门禁
 

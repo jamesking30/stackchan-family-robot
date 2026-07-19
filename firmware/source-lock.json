@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "board": "m5stack-stack-chan",
+  "stackchan": {
+    "repository": "https://github.com/m5stack/StackChan.git",
+    "revision": "b72b3ede38b32d54f0b6ba51c62cfcef2ec3ae1e"
+  },
+  "esp_idf": {
+    "version": "5.5.4",
+    "repository": "https://github.com/espressif/esp-idf.git",
+    "revision": "735507283d5b2f9fb363a1901172dbd9e847945d"
+  },
+  "repositories": [
+    {
+      "path": "components/mooncake",
+      "revision": "572a7e488641f1c3f22e85d65c27f095ecf27d12"
+    },
+    {
+      "path": "components/mooncake_log",
+      "revision": "554d55cd8c6e551b911b99cad274a46929f05bae"
+    },
+    {
+      "path": "components/smooth_ui_toolkit",
+      "revision": "2a18ff5d3fd6b402339d0f4f3c2834f574e3cb05"
+    },
+    {
+      "path": "xiaozhi-esp32",
+      "revision": "e77dedb1309153bb63fed285772962c920c97dd4",
+      "patch": "patches/xiaozhi-esp32.patch",
+      "patch_sha256": "dc2aad0bdbaa9c8ff83b7bb94eb5c20703dfeeb11d0f1c94b30a33c9051a5336"
+    },
+    {
+      "path": "components/ArduinoJson",
+      "revision": "733bc4ee82630c88c0a619a883cd3a206efae977"
+    },
+    {
+      "path": "components/esp-now",
+      "revision": "c33383de97f3ed2fc52117f5ef04f71990432e5d"
+    }
+  ]
+}
