@@ -2,14 +2,15 @@
 
 ## 设计边界
 
-Mac 是可信主机；StackChan 是实时交互终端。两者之间只传输短时会话数据、音频、表情、动作和显示状态。身份库、长期记忆、家庭设备权限、OpenAI 密钥与审计日志只保存在 Mac。
+Mac 是可信主机；StackChan 是实时交互终端。两者之间只传输短时会话数据、音频、表情、动作和显示状态。身份库、长期记忆、家庭设备权限、DeepSeek 密钥与审计日志只保存在 Mac。
 
 ```mermaid
 flowchart LR
   U["家庭成员\n中文 / English"] --> R["StackChan\n麦克风·屏幕·舵机·摄像头"]
   R <-->|"局域网 WebSocket\n音频·JPEG·事件·表情"| G["实时对话网关\nAIAvatarKit"]
   G --> F["本地身份服务\n人脸→user_id+置信度"]
-  G --> O["OpenAI\nSTT / LLM / TTS"]
+  G --> L["Mac 本地语音\nWhisper STT / 系统 TTS"]
+  G --> D["DeepSeek V4 Flash\n仅接收文字"]
   G --> C["本地控制 API"]
   C --> M["SQLite→ChatMemory\n四用户隔离记忆"]
   C --> P["版本化角色与安全策略"]
@@ -41,6 +42,6 @@ flowchart LR
 ## 后续替换点
 
 - SQLite 记忆接口保持不变，数据层升级为 ChatMemory + PostgreSQL/pgvector。
-- 实时对话网关在 M2 接入 AIAvatarKit 与 OpenAI 语音链路；固件继续保留官方 StackChan BSP 硬件能力。
+- 实时对话网关在 M2 接入 AIAvatarKit、本地 Whisper、DeepSeek 与 macOS 系统语音；固件继续保留官方 StackChan BSP 硬件能力。
 - 人脸识别仅输出临时 `user_id` 和置信度；低于阈值进入访客会话，不做猜测。
 - 家庭设备统一经 OpenClaw → Home Assistant 适配器，危险动作要求成人二次确认。

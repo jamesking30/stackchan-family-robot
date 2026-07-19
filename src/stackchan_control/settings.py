@@ -23,13 +23,15 @@ class Settings:
     port: int = 8765
     gateway_heartbeat_seconds: float = 5.0
     gateway_timeout_seconds: float = 15.0
-    openai_api_key: str | None = None
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-v4-flash"
     voice_auto_start: bool = False
     voice_user_id: str = "user-2"
-    voice_transcription_model: str = "gpt-4o-transcribe"
-    voice_chat_model: str = "gpt-5.6-terra"
-    voice_tts_model: str = "tts-1"
-    voice_name: str = "alloy"
+    voice_whisper_binary: str = "whisper-cli"
+    voice_whisper_model: Path = PROJECT_ROOT / "var/models/ggml-small.bin"
+    voice_zh_name: str = "Tingting"
+    voice_en_name: str = "Samantha"
     voice_silence_ms: int = 780
     voice_min_speech_ms: int = 300
     voice_max_speech_seconds: int = 15
@@ -55,16 +57,25 @@ class Settings:
             gateway_timeout_seconds=float(
                 os.getenv("ROBOT_GATEWAY_TIMEOUT_SECONDS", "15")
             ),
-            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
+            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY") or None,
+            deepseek_base_url=os.getenv(
+                "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
+            ).rstrip("/"),
+            deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
             voice_auto_start=os.getenv("ROBOT_VOICE_AUTO_START", "false").lower()
             in {"1", "true", "yes", "on"},
             voice_user_id=os.getenv("ROBOT_VOICE_USER_ID", "user-2"),
-            voice_transcription_model=os.getenv(
-                "ROBOT_VOICE_TRANSCRIPTION_MODEL", "gpt-4o-transcribe"
+            voice_whisper_binary=os.getenv(
+                "ROBOT_VOICE_WHISPER_BINARY", "whisper-cli"
             ),
-            voice_chat_model=os.getenv("ROBOT_VOICE_CHAT_MODEL", "gpt-5.6-terra"),
-            voice_tts_model=os.getenv("ROBOT_VOICE_TTS_MODEL", "tts-1"),
-            voice_name=os.getenv("ROBOT_VOICE_NAME", "alloy"),
+            voice_whisper_model=Path(
+                os.getenv(
+                    "ROBOT_VOICE_WHISPER_MODEL",
+                    str(PROJECT_ROOT / "var/models/ggml-small.bin"),
+                )
+            ).expanduser(),
+            voice_zh_name=os.getenv("ROBOT_VOICE_ZH_NAME", "Tingting"),
+            voice_en_name=os.getenv("ROBOT_VOICE_EN_NAME", "Samantha"),
             voice_silence_ms=int(os.getenv("ROBOT_VOICE_SILENCE_MS", "780")),
             voice_min_speech_ms=int(os.getenv("ROBOT_VOICE_MIN_SPEECH_MS", "300")),
             voice_max_speech_seconds=int(

@@ -61,6 +61,12 @@ index 0fc43ec..2571567 100644
          GetHAL().onWsCallResponse.connect([this](bool accepted) {
              if (!isConnected()) {
                  return;
+@@ -127,4 +159,5 @@ public:
+         _websocket->OnDisconnected([this]() {
+             ESP_LOGI(_tag.c_str(), "Disconnected!");
++            _last_reconnect_attempt = GetHAL().millis();
+             // GetHAL().onWsLog.emit(CommonLogLevel::Error, "Server disconnected");
+         });
 @@ -197,15 +229,18 @@ public:
              ESP_LOGI(_tag.c_str(), "Received binary type: %d, len: %d", (int)type, (int)msg.data.size());
  

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -163,3 +164,12 @@ def test_gateway_heartbeat_and_device_rest_compatibility(gateway_client):
             "/v1/device/state", headers=ADMIN_HEADERS
         ).json()
         assert state["last_message_type"] == MessageType.HEARTBEAT_PONG
+
+
+def test_gateway_sends_heartbeat_during_continuous_audio(gateway_client):
+    with gateway_client.websocket_connect(WS_PATH, headers=DEVICE_HEADERS) as websocket:
+        for _ in range(5):
+            websocket.send_bytes(pack_frame(MessageType.OPUS, b"audio"))
+            time.sleep(0.012)
+        ping = unpack_frame(websocket.receive_bytes())
+        assert ping.message_type == MessageType.HEARTBEAT_PING

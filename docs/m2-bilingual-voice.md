@@ -6,30 +6,32 @@ M2 采用 Mac 编排、StackChan 实时采播的本地优先结构：
 
 1. Avatar 应用收到 Mac 的 `START_AUDIO_STREAM` 后才打开麦克风。
 2. 设备以 16kHz、60ms 单声道 Opus 帧发送音频，并发送设备侧 VAD 开始/结束事件。
-3. Mac 只在内存中解码和组成 WAV，请求转写后立即释放原始音频，不写入数据库或文件。
-4. Mac 从当前角色版本、当前用户权限和该用户已确认记忆构造提示，经 Responses API 得到短回答。
-5. TTS 返回 24kHz PCM，Mac 编码成 60ms Opus 帧并按播放速度下发；回答文字同时显示在脸部界面。
+3. Mac 在内存中解码音频；本地 Whisper 使用系统临时目录完成转写，任务结束立即删除临时 WAV。
+4. Mac 从当前角色版本、当前用户权限和该用户已确认记忆构造提示，仅把文字发送给 DeepSeek Chat Completions 得到短回答。
+5. macOS 系统语音在本地生成 24kHz PCM，Mac 编码成 60ms Opus 帧并按播放速度下发；回答文字同时显示在脸部界面。
 6. 说话期间检测到新的设备侧 VAD 事件会取消当前下发、清空设备播放队列并恢复监听。
 
 默认会话使用 `user-2`（`unassigned`），在人脸识别 M3 完成前不推断成人身份或使用成人权限。角色安全文档始终排在用户话语和记忆之前。
 
 ## 模型与可替换配置
 
-| 环节 | 默认模型 | 选择原因 |
+| 环节 | 默认实现 | 选择原因 |
 |---|---|---|
-| 转写 | `gpt-4o-transcribe` | 中英识别准确度优先 |
-| 回答 | `gpt-5.6-terra` | 家庭对话的质量、延迟和成本平衡 |
-| 合成 | `tts-1` / `alloy` | 低延迟 PCM 输出，便于设备端流式播放 |
+| 转写 | whisper.cpp `ggml-small.bin` | Apple Silicon 本地运行，中英自动识别，录音不出主机 |
+| 回答 | `deepseek-v4-flash` 非思考模式 | 家庭短对话延迟和成本优先 |
+| 合成 | macOS `Tingting` / `Samantha` | 本地中英文语音，不依赖云端音频接口 |
 
-当前官方总模型指南把 `gpt-5.6-sol` 定位为复杂推理/编码旗舰，`gpt-5.6-terra` 定位为智能与成本平衡；家庭短对话因此默认使用 Terra。全部模型均可通过 `.env` 更换，无需重新刷机。
+模型和本地语音均可通过 `.env` 更换，无需重新刷机。机器人对话明确关闭 DeepSeek 思考模式，避免短回答消耗不必要的推理时间。
 
 ```dotenv
 ROBOT_VOICE_AUTO_START=false
 ROBOT_VOICE_USER_ID=user-2
-ROBOT_VOICE_TRANSCRIPTION_MODEL=gpt-4o-transcribe
-ROBOT_VOICE_CHAT_MODEL=gpt-5.6-terra
-ROBOT_VOICE_TTS_MODEL=tts-1
-ROBOT_VOICE_NAME=alloy
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+ROBOT_VOICE_WHISPER_BINARY=whisper-cli
+ROBOT_VOICE_WHISPER_MODEL=var/models/ggml-small.bin
+ROBOT_VOICE_ZH_NAME=Tingting
+ROBOT_VOICE_EN_NAME=Samantha
 ```
 
 ## 管理命令
@@ -55,13 +57,14 @@ robotctl voice stop
 
 ## 隐私与故障边界
 
-- OpenAI 密钥只保存在 Mac，不进入固件、WebSocket 帧或 Git。
-- 原始 Opus、PCM 和临时 WAV 只存在于内存。
+- DeepSeek 密钥只保存在 Mac，不进入固件、WebSocket 帧或 Git。
+- 原始 Opus 和 PCM 不进入数据库；Whisper 与系统语音使用的临时文件在每次调用结束时自动删除。
+- DeepSeek 只接收转写文字、角色规则和当前用户已确认的少量记忆，不接收原始音频。
 - 当前状态接口只返回本轮转写文字、回答文字、阶段和错误；不返回音频。
 - 设备离线时拒绝开始会话；停止和打断会取消后台任务并清空设备播放队列。
-- OpenAI 失败时只记录状态码和请求 ID，不记录密钥或原始音频。
+- DeepSeek 失败时只记录状态码、错误代码和请求 ID，不记录密钥或原始音频。
 - 摄像头流仍保持关闭。
 
 ## 尚待现场验证
 
-设备麦克风/VAD/Opus 收包、扬声器播放和真实中英对话需在 M2 固件启动后验证。真实云端回路还要求 `.env` 中存在有效 `OPENAI_API_KEY`。
+设备麦克风、主机侧 VAD 和 Opus 上行已通过真机验证；DeepSeek V4 Flash、本地中文 TTS 和本地 Whisper 回读也已分别通过。剩余验收项是把完整回答通过 StackChan 扬声器播放，并完成连续中英切换与打断测试。

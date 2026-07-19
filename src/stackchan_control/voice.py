@@ -6,6 +6,9 @@ import ctypes
 import ctypes.util
 import io
 import json
+import re
+import shutil
+import tempfile
 import time
 import wave
 from collections import deque
@@ -43,87 +46,155 @@ class VoiceProvider(Protocol):
     async def synthesize(self, text: str) -> bytes: ...
 
 
-class OpenAIVoiceProvider:
+class LocalDeepSeekVoiceProvider:
+    """Local ASR/TTS with DeepSeek receiving text only."""
+
     def __init__(self, settings: Settings) -> None:
-        if not settings.openai_api_key:
-            raise VoiceError("OPENAI_API_KEY is required for voice conversations")
-        self.api_key = settings.openai_api_key
-        self.transcription_model = settings.voice_transcription_model
-        self.chat_model = settings.voice_chat_model
-        self.tts_model = settings.voice_tts_model
-        self.voice = settings.voice_name
+        if not settings.deepseek_api_key:
+            raise VoiceError("DEEPSEEK_API_KEY is required for voice conversations")
+        self.api_key = settings.deepseek_api_key
+        self.base_url = settings.deepseek_base_url.rstrip("/")
+        self.model = settings.deepseek_model
+        self.whisper_binary = settings.voice_whisper_binary
+        self.whisper_model = settings.voice_whisper_model
+        self.zh_voice = settings.voice_zh_name
+        self.en_voice = settings.voice_en_name
+
+        if shutil.which(self.whisper_binary) is None:
+            raise VoiceError(f"local Whisper binary was not found: {self.whisper_binary}")
+        if not self.whisper_model.is_file():
+            raise VoiceError(f"local Whisper model was not found: {self.whisper_model}")
+        if shutil.which("say") is None or shutil.which("ffmpeg") is None:
+            raise VoiceError("local speech synthesis requires macOS say and ffmpeg")
 
     @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
     async def transcribe(self, wav_audio: bytes) -> str:
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/audio/transcriptions",
-                headers=self.headers,
-                data={"model": self.transcription_model, "response_format": "json"},
-                files={"file": ("utterance.wav", wav_audio, "audio/wav")},
+        with tempfile.TemporaryDirectory(prefix="stackchan-whisper-") as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "utterance.wav"
+            output_path = temp_path / "transcript"
+            input_path.write_bytes(wav_audio)
+            process = await asyncio.create_subprocess_exec(
+                self.whisper_binary,
+                "-m",
+                str(self.whisper_model),
+                "-f",
+                str(input_path),
+                "-l",
+                "auto",
+                "-t",
+                "6",
+                "-otxt",
+                "-of",
+                str(output_path),
+                "-np",
+                "-nt",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-        self._raise(response, "transcription")
-        text = str(response.json().get("text", "")).strip()
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                detail = stderr.decode("utf-8", errors="replace").strip()[-240:]
+                raise VoiceError(f"local Whisper failed: {detail or process.returncode}")
+            transcript_file = output_path.with_suffix(".txt")
+            if transcript_file.is_file():
+                text = transcript_file.read_text(encoding="utf-8").strip()
+            else:
+                text = stdout.decode("utf-8", errors="replace").strip()
         if not text:
-            raise VoiceError("transcription returned no text")
+            raise VoiceError("local Whisper returned no text")
         return text
 
     async def answer(self, instructions: str, transcript: str) -> str:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                "https://api.openai.com/v1/responses",
+                f"{self.base_url}/chat/completions",
                 headers={**self.headers, "Content-Type": "application/json"},
                 json={
-                    "model": self.chat_model,
-                    "instructions": instructions,
-                    "input": transcript,
-                    "max_output_tokens": 240,
-                    "store": False,
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": instructions},
+                        {"role": "user", "content": transcript},
+                    ],
+                    "thinking": {"type": "disabled"},
+                    "max_tokens": 240,
+                    "stream": False,
                 },
             )
         self._raise(response, "response")
         body = response.json()
-        direct = body.get("output_text")
-        if isinstance(direct, str) and direct.strip():
-            return direct.strip()
-        parts: list[str] = []
-        for item in body.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") == "output_text" and content.get("text"):
-                    parts.append(str(content["text"]))
-        answer = "".join(parts).strip()
+        choices = body.get("choices", [])
+        answer = ""
+        if choices:
+            answer = str(choices[0].get("message", {}).get("content", "")).strip()
         if not answer:
-            raise VoiceError("response returned no spoken text")
+            raise VoiceError("DeepSeek returned no spoken text")
         return answer
 
     async def synthesize(self, text: str) -> bytes:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/audio/speech",
-                headers={**self.headers, "Content-Type": "application/json"},
-                json={
-                    "model": self.tts_model,
-                    "voice": self.voice,
-                    "input": text,
-                    "response_format": "pcm",
-                    "speed": 1.0,
-                },
+        voice = self.zh_voice if re.search(r"[\u3400-\u9fff]", text) else self.en_voice
+        with tempfile.TemporaryDirectory(prefix="stackchan-tts-") as temp_dir:
+            aiff_path = Path(temp_dir) / "speech.aiff"
+            say_process = await asyncio.create_subprocess_exec(
+                "say",
+                "-v",
+                voice,
+                "-o",
+                str(aiff_path),
+                "-f",
+                "-",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
-        self._raise(response, "speech synthesis")
-        if not response.content:
-            raise VoiceError("speech synthesis returned no audio")
-        return response.content
+            _, say_stderr = await say_process.communicate(text.encode("utf-8"))
+            if say_process.returncode != 0:
+                detail = say_stderr.decode("utf-8", errors="replace").strip()[-240:]
+                raise VoiceError(f"local speech synthesis failed: {detail}")
+
+            convert_process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-i",
+                str(aiff_path),
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            pcm, convert_stderr = await convert_process.communicate()
+            if convert_process.returncode != 0:
+                detail = convert_stderr.decode("utf-8", errors="replace").strip()[-240:]
+                raise VoiceError(f"local audio conversion failed: {detail}")
+        if not pcm:
+            raise VoiceError("local speech synthesis returned no audio")
+        return pcm
 
     @staticmethod
     def _raise(response: httpx.Response, operation: str) -> None:
         if response.is_success:
             return
         request_id = response.headers.get("x-request-id", "unknown")
+        error_code = "unknown"
+        try:
+            error_code = str(response.json().get("error", {}).get("code", "unknown"))
+        except ValueError:
+            pass
         raise VoiceError(
-            f"OpenAI {operation} failed with HTTP {response.status_code}; request_id={request_id}"
+            f"DeepSeek {operation} failed with HTTP {response.status_code}; "
+            f"code={error_code}; request_id={request_id}"
         )
 
 
@@ -292,7 +363,7 @@ class VoiceSessionManager:
 
     def _ensure_provider(self) -> None:
         if self.provider is None:
-            self.provider = OpenAIVoiceProvider(self.settings)
+            self.provider = LocalDeepSeekVoiceProvider(self.settings)
 
     async def start(self, user_id: str | None = None) -> dict[str, object]:
         target_user = user_id or self.state.user_id

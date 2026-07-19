@@ -196,7 +196,10 @@ def create_app(
             "version": "0.3.0",
             "local_first": True,
             "device_gateway_auth_configured": bool(current_settings.device_api_key),
-            "voice_configured": bool(current_settings.openai_api_key),
+            "voice_configured": bool(
+                current_settings.deepseek_api_key
+                and current_settings.voice_whisper_model.is_file()
+            ),
         }
 
     @app.websocket("/stackChan/ws")
@@ -220,21 +223,36 @@ def create_app(
         await websocket.accept()
         session = await gateway.register(device_id, websocket)
         await voice.on_device_connected()
+        last_ping_monotonic = time.monotonic()
         try:
             while True:
+                elapsed = time.monotonic() - last_ping_monotonic
+                receive_timeout = max(
+                    0.01, current_settings.gateway_heartbeat_seconds - elapsed
+                )
                 try:
                     message = await asyncio.wait_for(
                         websocket.receive(),
-                        timeout=current_settings.gateway_heartbeat_seconds,
+                        timeout=receive_timeout,
                     )
                 except asyncio.TimeoutError:
-                    if (
-                        time.monotonic() - session.last_pong_monotonic
-                        > current_settings.gateway_timeout_seconds
-                    ):
-                        await websocket.close(code=1001, reason="heartbeat timeout")
-                        break
+                    message = None
+
+                if (
+                    time.monotonic() - session.last_pong_monotonic
+                    > current_settings.gateway_timeout_seconds
+                ):
+                    await websocket.close(code=1001, reason="heartbeat timeout")
+                    break
+
+                if (
+                    time.monotonic() - last_ping_monotonic
+                    >= current_settings.gateway_heartbeat_seconds
+                ):
                     await gateway.send(MessageType.HEARTBEAT_PING, device_id=device_id)
+                    last_ping_monotonic = time.monotonic()
+
+                if message is None:
                     continue
 
                 if message["type"] == "websocket.disconnect":
