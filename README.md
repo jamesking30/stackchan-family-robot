@@ -2,7 +2,7 @@
 
 面向家庭的本地优先 StackChan 控制系统。Mac 保存角色、四用户记忆、家庭设备权限与 Codex/OpenClaw 任务状态；机器人只负责实时音视频、表情和动作。
 
-当前里程碑是 **M1：真机通信与表情动作**。M0 控制平面已经完成，并新增：
+当前里程碑是 **M2：中英语音对话**。M0 控制平面和 M1 真机通信已经完成，并新增：
 
 - 中英双语、儿童安全的默认角色；
 - 可热更新、带版本与回滚的回答风格；
@@ -14,6 +14,9 @@
 - 与官方固件兼容的局域网 WebSocket、心跳、文字、表情和安全舵机控制；
 - Codex/OpenClaw 任务状态自动同步到在线机器人；
 - 设备专用密钥、Mac 本地 OTA 检查与可审计的产品固件构建。
+- 设备侧 VAD、16kHz Opus 麦克风流与 24kHz Opus 扬声器播放。
+- OpenAI 转写、Responses 回答和语音合成的内存态会话编排。
+- 语音打断、用户隔离提示、儿童安全规则和可热替换模型配置。
 
 ## 本地启动
 
@@ -43,6 +46,9 @@ robotctl character show
 robotctl character style "回答更短，每次最多三句；英文词汇后给出简短中文解释。"
 robotctl tasks report --source codex --title "编译固件" --status running --progress 0.4
 robotctl tasks list
+robotctl voice start --user user-2
+robotctl voice state
+robotctl voice stop
 ```
 
 把 MCP 服务接到 Codex 或 OpenClaw：

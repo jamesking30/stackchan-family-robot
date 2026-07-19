@@ -142,3 +142,24 @@ class RobotExpressionCommand(BaseModel):
 class RobotTextCommand(BaseModel):
     name: str = Field(default="家庭助手", min_length=1, max_length=40)
     content: str = Field(min_length=1, max_length=240)
+
+
+class VoiceStartRequest(BaseModel):
+    user_id: str = Field(default="user-2", min_length=1, max_length=80)
+
+
+class VoiceTextTurn(BaseModel):
+    transcript: str = Field(min_length=1, max_length=1000)
+
+
+class VoiceStateResponse(BaseModel):
+    mode: Literal[
+        "stopped", "listening", "transcribing", "thinking", "speaking", "error"
+    ]
+    enabled: bool
+    user_id: str
+    turn_id: int
+    transcript: str | None = None
+    response_text: str | None = None
+    error: str | None = None
+    updated_at: datetime

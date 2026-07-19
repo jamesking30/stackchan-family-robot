@@ -74,6 +74,16 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--status", choices=["queued", "running", "waiting", "completed", "failed", "cancelled"], required=True)
     report.add_argument("--progress", type=float, default=0)
     report.add_argument("--summary", default="")
+
+    voice = commands.add_parser("voice")
+    voice_commands = voice.add_subparsers(dest="voice_command", required=True)
+    voice_commands.add_parser("state")
+    voice_start = voice_commands.add_parser("start")
+    voice_start.add_argument("--user", default="user-2")
+    voice_commands.add_parser("stop")
+    voice_commands.add_parser("interrupt")
+    voice_turn = voice_commands.add_parser("say")
+    voice_turn.add_argument("transcript")
     return parser
 
 
@@ -122,6 +132,16 @@ def main() -> None:
             "progress": args.progress,
             "summary": args.summary,
         }))
+    elif args.command == "voice" and args.voice_command == "state":
+        print_json(request("GET", "/v1/voice/state"))
+    elif args.command == "voice" and args.voice_command == "start":
+        print_json(request("POST", "/v1/voice/start", {"user_id": args.user}))
+    elif args.command == "voice" and args.voice_command == "stop":
+        print_json(request("POST", "/v1/voice/stop"))
+    elif args.command == "voice" and args.voice_command == "interrupt":
+        print_json(request("POST", "/v1/voice/interrupt"))
+    elif args.command == "voice" and args.voice_command == "say":
+        print_json(request("POST", "/v1/voice/turn", {"transcript": args.transcript}))
     else:
         sys.exit(2)
 

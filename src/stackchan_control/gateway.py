@@ -36,6 +36,7 @@ class MessageType(IntEnum):
     DANCE_SEQUENCE = 0x14
     START_AUDIO_STREAM = 0x18
     STOP_AUDIO_STREAM = 0x19
+    VOICE_ACTIVITY = 0x1A
 
 
 class ProtocolError(ValueError):
@@ -176,3 +177,8 @@ class StackChanGateway:
             "frames_sent": session.frames_sent,
             "last_message_type": session.last_message_type,
         }
+
+    async def is_online(self, device_id: str | None = None) -> bool:
+        target_id = device_id or self.default_device_id
+        async with self._lock:
+            return target_id in self._sessions

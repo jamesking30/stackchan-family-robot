@@ -9,6 +9,20 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/firmware_env.sh"
 "$SCRIPT_DIR/prepare_firmware.sh"
 
+PRODUCT_PATCH="$PROJECT_ROOT/firmware/product_patches/m2-avatar-audio.patch"
+STACKCHAN_REPO_DIR="$PROJECT_ROOT/firmware/upstream/stackchan"
+PATCH_APPLIED=0
+cleanup_product_patch() {
+  if [[ "$PATCH_APPLIED" == "1" ]]; then
+    git -C "$STACKCHAN_REPO_DIR" apply --reverse "$PRODUCT_PATCH"
+  fi
+}
+trap cleanup_product_patch EXIT
+
+git -C "$STACKCHAN_REPO_DIR" apply --check "$PRODUCT_PATCH"
+git -C "$STACKCHAN_REPO_DIR" apply "$PRODUCT_PATCH"
+PATCH_APPLIED=1
+
 CONFIG_DIR="${STACKCHAN_FIRMWARE_CONFIG_DIR:-$PROJECT_ROOT/var/firmware-config}"
 PRODUCT_BUILD_DIR="${STACKCHAN_PRODUCT_BUILD_DIR:-$PROJECT_ROOT/var/firmware-build/product-m5stack-stack-chan-b72b3ede}"
 export STACKCHAN_GENERATED_CONFIG_DIR="$CONFIG_DIR"

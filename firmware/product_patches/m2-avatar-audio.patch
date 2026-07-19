@@ -1,0 +1,124 @@
+diff --git a/firmware/main/hal/hal_ws_avatar.cpp b/firmware/main/hal/hal_ws_avatar.cpp
+index 0fc43ec..2571567 100644
+--- a/firmware/main/hal/hal_ws_avatar.cpp
++++ b/firmware/main/hal/hal_ws_avatar.cpp
+@@ -25,6 +25,7 @@
+ #include <wifi_manager.h>
+ #include "utils/jpeg_to_image/jpeg_decoder.h"
+ #include "utils/secret_logic/secret_logic.h"
++#include <audio_service.h>
+ 
+ static std::string _tag = "WS-Avatar";
+ 
+@@ -54,6 +55,7 @@ public:
+         DanceSequence     = 0x14,
+         StartAudioStream  = 0x18,
+         StopAudioStream   = 0x19,
++        VoiceActivity     = 0x1A,
+     };
+ 
+     struct ReceivedMessage {
+@@ -61,12 +63,42 @@ public:
+         std::vector<uint8_t> data;
+     };
+ 
++    ~WebSocketAvatar()
++    {
++        if (_audio_initialized) {
++            _audio_service.EnableVoiceProcessing(false);
++            _audio_service.Stop();
++            vTaskDelay(pdMS_TO_TICKS(100));
++        }
++    }
++
+     void init()
+     {
+         _url = fmt::format("{}/stackChan/ws?deviceType=StackChan", secret_logic::get_server_url());
+ 
+         connect();
+ 
++        auto audio_codec = Board::GetInstance().GetAudioCodec();
++        if (audio_codec) {
++            _audio_service.Initialize(audio_codec);
++            AudioServiceCallbacks callbacks;
++            callbacks.on_send_queue_available = [this]() {
++                while (auto packet = _audio_service.PopPacketFromSendQueue()) {
++                    sendPacket(DataType::Opus, packet->payload.data(), packet->payload.size());
++                }
++            };
++            callbacks.on_vad_change = [this](bool speaking) {
++                const uint8_t state = speaking ? 1 : 0;
++                sendPacket(DataType::VoiceActivity, &state, 1);
++            };
++            _audio_service.SetCallbacks(callbacks);
++            _audio_service.Start();
++            _audio_initialized = true;
++            ESP_LOGI(_tag.c_str(), "Avatar audio service initialized");
++        } else {
++            ESP_LOGE(_tag.c_str(), "Avatar audio codec unavailable");
++        }
++
+         GetHAL().onWsCallResponse.connect([this](bool accepted) {
+             if (!isConnected()) {
+                 return;
+@@ -197,15 +229,18 @@ public:
+             ESP_LOGI(_tag.c_str(), "Received binary type: %d, len: %d", (int)type, (int)msg.data.size());
+ 
+             switch (type) {
+-                // Opus handled in OnData Fast Path
+-                // case DataType::Opus: {
+-                //     if (msg.data.size() > 5) {
+-                //         auto packet = std::make_unique<AudioStreamPacket>();
+-                //         packet->payload.assign(msg.data.begin() + 5, msg.data.end());
+-                //         _audio_service.PushPacketToDecodeQueue(std::move(packet));
+-                //     }
+-                //     break;
+-                // }
++                case DataType::Opus: {
++                    if (_audio_initialized && msg.data.size() > 5) {
++                        auto packet            = std::make_unique<AudioStreamPacket>();
++                        packet->sample_rate    = 24000;
++                        packet->frame_duration = OPUS_FRAME_DURATION_MS;
++                        packet->payload.assign(msg.data.begin() + 5, msg.data.end());
++                        if (!_audio_service.PushPacketToDecodeQueue(std::move(packet))) {
++                            ESP_LOGW(_tag.c_str(), "Audio playback queue full, dropping frame");
++                        }
++                    }
++                    break;
++                }
+                 case DataType::StartCameraStream: {
+                     ESP_LOGI(_tag.c_str(), "Start Camera Stream");
+                     setStreamingEnabled(true);
+@@ -357,9 +392,22 @@ public:
+                     break;
+                 }
+                 case DataType::StartAudioStream: {
++                    if (_audio_initialized && !_audio_streaming) {
++                        _audio_service.EnableVoiceProcessing(true);
++                        _audio_streaming = true;
++                        ESP_LOGI(_tag.c_str(), "Audio stream started");
++                    }
+                     break;
+                 }
+                 case DataType::StopAudioStream: {
++                    if (_audio_initialized) {
++                        if (_audio_streaming) {
++                            _audio_service.EnableVoiceProcessing(false);
++                            _audio_streaming = false;
++                        }
++                        _audio_service.ResetDecoder();
++                        ESP_LOGI(_tag.c_str(), "Audio stream stopped");
++                    }
+                     break;
+                 }
+                 default:
+@@ -432,6 +480,9 @@ private:
+     uint32_t _last_heartbeat_time    = 0;
+     bool _is_streaming               = false;
+     bool _is_video_mode              = false;
++    bool _audio_initialized          = false;
++    bool _audio_streaming            = false;
++    AudioService _audio_service;
+     std::mutex _mutex;
+     std::queue<ReceivedMessage> _msg_queue;
+ 

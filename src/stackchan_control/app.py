@@ -43,8 +43,12 @@ from .schemas import (
     TaskReport,
     UserProfile,
     UserUpdate,
+    VoiceStartRequest,
+    VoiceStateResponse,
+    VoiceTextTurn,
 )
 from .settings import Settings
+from .voice import OpusCodec, VoiceError, VoiceProvider, VoiceSessionManager
 
 
 EXPRESSION_PROFILES = {
@@ -86,7 +90,11 @@ def expression_payload(emotion: str, mouth_weight: int | None = None) -> dict[st
     return payload
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    voice_provider: VoiceProvider | None = None,
+    voice_codec: OpusCodec | None = None,
+) -> FastAPI:
     current_settings = settings or Settings.from_env()
     if current_settings.host not in {"127.0.0.1", "localhost", "::1"} and not (
         current_settings.admin_api_key
@@ -96,15 +104,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         current_settings.db_path, current_settings.seed_character_dir
     )
     gateway = StackChanGateway(current_settings.device_id)
+    voice = VoiceSessionManager(
+        current_settings,
+        repository,
+        gateway,
+        provider=voice_provider,
+        codec=voice_codec,
+    )
 
     app = FastAPI(
         title="StackChan Family Robot Control API",
-        version="0.2.0",
-        description="Local-first control plane and StackChan LAN gateway.",
+        version="0.3.0",
+        description="Local-first control plane, StackChan LAN gateway and bilingual voice loop.",
     )
     app.state.settings = current_settings
     app.state.repository = repository
     app.state.gateway = gateway
+    app.state.voice = voice
 
     async def sync_display_to_device() -> None:
         display = repository.display_state()
@@ -164,6 +180,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def device_offline_handler(_: Request, exc: DeviceOfflineError):
         return _json_error(409, str(exc))
 
+    @app.exception_handler(VoiceError)
+    async def voice_error_handler(_: Request, exc: VoiceError):
+        return _json_error(422, str(exc))
+
     @app.get("/", include_in_schema=False)
     def admin_page() -> FileResponse:
         return FileResponse(current_settings.web_dir / "index.html")
@@ -173,9 +193,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "ok": True,
             "service": "stackchan-control",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "local_first": True,
             "device_gateway_auth_configured": bool(current_settings.device_api_key),
+            "voice_configured": bool(current_settings.openai_api_key),
         }
 
     @app.websocket("/stackChan/ws")
@@ -198,6 +219,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         await websocket.accept()
         session = await gateway.register(device_id, websocket)
+        await voice.on_device_connected()
         try:
             while True:
                 try:
@@ -225,12 +247,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         await websocket.close(code=1003, reason="invalid binary frame")
                         break
                     await gateway.record_frame(session, frame)
+                    if frame.message_type == MessageType.OPUS:
+                        await voice.ingest_opus(frame.payload)
+                    elif frame.message_type == MessageType.VOICE_ACTIVITY:
+                        await voice.voice_activity(bool(frame.payload[:1] == b"\x01"))
                 elif message.get("text") is not None:
                     await gateway.record_text(session)
         except (WebSocketDisconnect, DeviceOfflineError, asyncio.CancelledError):
             pass
         finally:
             await gateway.disconnect(session)
+            await voice.on_device_disconnected()
 
     @app.get(
         "/stackChan/device/user",
@@ -322,6 +349,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def sync_device_display() -> dict[str, object]:
         await sync_display_to_device()
         return await gateway.snapshot()
+
+    @app.get(
+        "/v1/voice/state",
+        response_model=VoiceStateResponse,
+        dependencies=[Depends(require_admin)],
+    )
+    async def voice_state() -> dict[str, object]:
+        return voice.state.snapshot()
+
+    @app.post(
+        "/v1/voice/start",
+        response_model=VoiceStateResponse,
+        dependencies=[Depends(require_admin)],
+    )
+    async def voice_start(body: VoiceStartRequest) -> dict[str, object]:
+        return await voice.start(body.user_id)
+
+    @app.post(
+        "/v1/voice/stop",
+        response_model=VoiceStateResponse,
+        dependencies=[Depends(require_admin)],
+    )
+    async def voice_stop() -> dict[str, object]:
+        return await voice.stop()
+
+    @app.post(
+        "/v1/voice/interrupt",
+        response_model=VoiceStateResponse,
+        dependencies=[Depends(require_admin)],
+    )
+    async def voice_interrupt() -> dict[str, object]:
+        return await voice.interrupt()
+
+    @app.post(
+        "/v1/voice/turn",
+        response_model=VoiceStateResponse,
+        dependencies=[Depends(require_admin)],
+    )
+    async def voice_turn(body: VoiceTextTurn) -> dict[str, object]:
+        return await voice.submit_text(body.transcript)
 
     @app.get(
         "/v1/users",
