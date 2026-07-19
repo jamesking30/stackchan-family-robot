@@ -1,0 +1,45 @@
+{
+  "profile_version": 1,
+  "board_sku": "m5stack-stack-chan",
+  "soc": {
+    "family": "ESP32-S3",
+    "package": "QFN56",
+    "revision": "v0.2",
+    "cores": 2,
+    "max_frequency_mhz": 240,
+    "usb": "USB-Serial/JTAG"
+  },
+  "memory": {
+    "flash_mb": 16,
+    "flash_mode": "QIO",
+    "flash_frequency_mhz": 80,
+    "psram_mb": 8,
+    "psram_frequency_mhz": 80
+  },
+  "display": {
+    "controller": "ILI9342-compatible",
+    "width": 320,
+    "height": 240,
+    "touch": "FT6336"
+  },
+  "camera": {
+    "sensor": "GC0308",
+    "detected_pid": "0x9b"
+  },
+  "audio": {
+    "input_sample_rate_hz": 24000,
+    "output_sample_rate_hz": 24000,
+    "speaker_codec": "AW88298",
+    "microphone_codec": "ES7210"
+  },
+  "power_management": "AXP2101",
+  "io_expanders": ["AW9523", "PY32IOExpander"],
+  "servos": {
+    "bus": "SCS",
+    "ids": [1, 2]
+  },
+  "security_defaults": {
+    "secure_boot": false,
+    "flash_encryption": false
+  }
+}

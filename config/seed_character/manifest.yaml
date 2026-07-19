@@ -1,0 +1,8 @@
+id: family-companion
+name: 小栈 / Stack-chan
+default_locale: zh-CN
+supported_locales:
+  - zh-CN
+  - en-US
+audience: family
+revision: 1

@@ -1,0 +1,7 @@
+greeting: nod
+agreement: nod
+disagreement: shake
+listening: look_at_speaker
+thinking: slow_tilt
+task_complete: small_nod
+task_failed: return_to_neutral

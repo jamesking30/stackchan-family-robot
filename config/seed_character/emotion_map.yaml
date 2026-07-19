@@ -1,0 +1,9 @@
+neutral: neutral
+happy: happy
+excited: excited
+thinking: thinking
+concerned: sad
+apologetic: sad
+task_running: focused
+task_complete: happy
+task_failed: concerned

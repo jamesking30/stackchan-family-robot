@@ -1,0 +1,14 @@
+default: ask_when_identity_uncertain
+actions:
+  conversation.reply: allow
+  memory.read_self: allow
+  memory.write_confirmed: allow
+  memory.write_inferred_child: review
+  home.read_state: allow
+  home.change_low_risk: confirm_user
+  home.unlock: confirm_adult
+  home.camera: confirm_adult
+  purchase.any: confirm_adult
+  account.change: confirm_adult
+  codex.read_task_status: allow
+  codex.start_or_change_task: confirm_adult

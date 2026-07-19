@@ -1,0 +1,7 @@
+primary_language: zh-CN
+secondary_language: en-US
+style: warm_clear
+speaking_rate: 1.0
+max_spoken_zh_chars: 80
+max_spoken_en_words: 45
+interruptible: true
