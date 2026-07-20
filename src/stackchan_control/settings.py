@@ -32,9 +32,13 @@ class Settings:
     voice_whisper_model: Path = PROJECT_ROOT / "var/models/ggml-small.bin"
     voice_zh_name: str = "Tingting"
     voice_en_name: str = "Samantha"
-    voice_silence_ms: int = 780
+    voice_silence_ms: int = 600
     voice_min_speech_ms: int = 300
     voice_max_speech_seconds: int = 15
+    voice_wake_word: str = "小栈小栈"
+    voice_wake_aliases: tuple[str, ...] = ("小站小站", "StackChan", "Stack Chan")
+    voice_wake_session_seconds: float = 45.0
+    voice_sleep_phrases: tuple[str, ...] = ("再见", "休息吧", "不用了")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -76,9 +80,27 @@ class Settings:
             ).expanduser(),
             voice_zh_name=os.getenv("ROBOT_VOICE_ZH_NAME", "Tingting"),
             voice_en_name=os.getenv("ROBOT_VOICE_EN_NAME", "Samantha"),
-            voice_silence_ms=int(os.getenv("ROBOT_VOICE_SILENCE_MS", "780")),
+            voice_silence_ms=int(os.getenv("ROBOT_VOICE_SILENCE_MS", "600")),
             voice_min_speech_ms=int(os.getenv("ROBOT_VOICE_MIN_SPEECH_MS", "300")),
             voice_max_speech_seconds=int(
                 os.getenv("ROBOT_VOICE_MAX_SPEECH_SECONDS", "15")
+            ),
+            voice_wake_word=os.getenv("ROBOT_VOICE_WAKE_WORD", "小栈小栈").strip(),
+            voice_wake_aliases=tuple(
+                item.strip()
+                for item in os.getenv(
+                    "ROBOT_VOICE_WAKE_ALIASES", "小站小站,StackChan,Stack Chan"
+                ).split(",")
+                if item.strip()
+            ),
+            voice_wake_session_seconds=float(
+                os.getenv("ROBOT_VOICE_WAKE_SESSION_SECONDS", "45")
+            ),
+            voice_sleep_phrases=tuple(
+                item.strip()
+                for item in os.getenv(
+                    "ROBOT_VOICE_SLEEP_PHRASES", "再见,休息吧,不用了"
+                ).split(",")
+                if item.strip()
             ),
         )

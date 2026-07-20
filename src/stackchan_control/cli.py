@@ -13,14 +13,20 @@ BASE_URL = os.getenv("ROBOT_CONTROL_URL", "http://127.0.0.1:8765").rstrip("/")
 ADMIN_KEY = os.getenv("ROBOT_ADMIN_API_KEY")
 
 
-def request(method: str, path: str, payload: dict | None = None):
+def request(
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    *,
+    timeout: float = 10,
+):
     headers = {"Content-Type": "application/json"}
     if ADMIN_KEY:
         headers["X-Robot-Admin-Key"] = ADMIN_KEY
     data = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else None
     req = urllib.request.Request(BASE_URL + path, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             if response.status == 204:
                 return None
             return json.loads(response.read().decode())
@@ -141,7 +147,14 @@ def main() -> None:
     elif args.command == "voice" and args.voice_command == "interrupt":
         print_json(request("POST", "/v1/voice/interrupt"))
     elif args.command == "voice" and args.voice_command == "say":
-        print_json(request("POST", "/v1/voice/turn", {"transcript": args.transcript}))
+        print_json(
+            request(
+                "POST",
+                "/v1/voice/turn",
+                {"transcript": args.transcript},
+                timeout=120,
+            )
+        )
     else:
         sys.exit(2)
 

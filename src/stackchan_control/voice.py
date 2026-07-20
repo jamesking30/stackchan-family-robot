@@ -15,8 +15,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Protocol
 from pathlib import Path
+from typing import AsyncIterator, Protocol
 
 import httpx
 
@@ -35,6 +35,7 @@ class NoSpeechDetected(VoiceError):
 
 class VoiceMode(str, Enum):
     STOPPED = "stopped"
+    WAITING_FOR_WAKE_WORD = "waiting_for_wake_word"
     LISTENING = "listening"
     TRANSCRIBING = "transcribing"
     THINKING = "thinking"
@@ -45,7 +46,12 @@ class VoiceMode(str, Enum):
 class VoiceProvider(Protocol):
     async def transcribe(self, wav_audio: bytes) -> str: ...
 
-    async def answer(self, instructions: str, transcript: str) -> str: ...
+    async def answer(
+        self,
+        instructions: str,
+        transcript: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> str: ...
 
     async def synthesize(self, text: str) -> bytes: ...
 
@@ -118,26 +124,45 @@ class LocalDeepSeekVoiceProvider:
     @staticmethod
     def _clean_transcript(text: str) -> str:
         compact = re.sub(r"\s+", " ", text).strip()
+        compact = re.sub(
+            r"\b([A-Za-z]{2,40})\1\b", r"\1", compact, flags=re.IGNORECASE
+        )
         if (
             not compact
             or compact.upper() in {"[BLANK_AUDIO]", "[NO SPEECH]", "(BLANK AUDIO)"}
             or re.search(r"[\uac00-\ud7af]", compact)
             or re.search(r"字幕.{0,4}(製作|制作|提供)", compact)
+            or not re.search(r"[A-Za-z0-9\u3400-\u9fff]", compact)
+            or re.fullmatch(r"(.)\1{4,}", compact)
         ):
             raise NoSpeechDetected("no Chinese or English speech detected")
         return compact
 
-    async def answer(self, instructions: str, transcript: str) -> str:
+    @staticmethod
+    def _messages(
+        instructions: str,
+        transcript: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": instructions},
+            *(history or []),
+            {"role": "user", "content": transcript},
+        ]
+
+    async def answer(
+        self,
+        instructions: str,
+        transcript: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> str:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers={**self.headers, "Content-Type": "application/json"},
                 json={
                     "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": instructions},
-                        {"role": "user", "content": transcript},
-                    ],
+                    "messages": self._messages(instructions, transcript, history),
                     "thinking": {"type": "disabled"},
                     "max_tokens": 240,
                     "stream": False,
@@ -152,6 +177,69 @@ class LocalDeepSeekVoiceProvider:
         if not answer:
             raise VoiceError("DeepSeek returned no spoken text")
         return answer
+
+    async def answer_segments(
+        self,
+        instructions: str,
+        transcript: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> AsyncIterator[str]:
+        payload = {
+            "model": self.model,
+            "messages": self._messages(instructions, transcript, history),
+            "thinking": {"type": "disabled"},
+            "max_tokens": 180,
+            "stream": True,
+        }
+        buffer = ""
+        yielded = False
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers={**self.headers, "Content-Type": "application/json"},
+                json=payload,
+            ) as response:
+                self._raise(response, "streaming response")
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        body = json.loads(data)
+                        raw_delta = (
+                            body.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        delta = raw_delta if isinstance(raw_delta, str) else ""
+                    except (ValueError, KeyError, IndexError, TypeError):
+                        continue
+                    buffer += delta
+                    segments, buffer = self._pop_spoken_segments(buffer)
+                    for segment in segments:
+                        yielded = True
+                        yield segment
+        tail = buffer.strip()
+        if tail:
+            yielded = True
+            yield tail
+        if not yielded:
+            raise VoiceError("DeepSeek returned no spoken text")
+
+    @staticmethod
+    def _pop_spoken_segments(buffer: str) -> tuple[list[str], str]:
+        segments: list[str] = []
+        start = 0
+        for match in re.finditer(r"[。！？!?；;]|(?<!\d)\.(?:\s|$)", buffer):
+            end = match.end()
+            segment = buffer[start:end].strip()
+            if segment:
+                segments.append(segment)
+            start = end
+        return segments, buffer[start:]
 
     async def synthesize(self, text: str) -> bytes:
         voice = self.zh_voice if re.search(r"[\u3400-\u9fff]", text) else self.en_voice
@@ -334,6 +422,8 @@ class VoiceState:
     enabled: bool = False
     user_id: str = "user-2"
     turn_id: int = 0
+    wake_word: str = ""
+    awake: bool = False
     transcript: str | None = None
     response_text: str | None = None
     error: str | None = None
@@ -347,6 +437,8 @@ class VoiceState:
             "enabled": self.enabled,
             "user_id": self.user_id,
             "turn_id": self.turn_id,
+            "wake_word": self.wake_word,
+            "awake": self.awake,
             "transcript": self.transcript,
             "response_text": self.response_text,
             "error": self.error,
@@ -373,11 +465,15 @@ class VoiceSessionManager:
         self.provider = provider
         self.codec = codec
         self.state = VoiceState(user_id=settings.voice_user_id)
+        self.state.wake_word = settings.voice_wake_word
         self._pre_roll: deque[bytes] = deque(maxlen=5)
         self._utterance: list[bytes] = []
         self._speaking_detected = False
         self._silence_ms = 0
+        self._noise_rms = 90.0
         self._ignore_audio_until = 0.0
+        self._wake_deadline: float | None = None
+        self._history: deque[dict[str, str]] = deque(maxlen=12)
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
@@ -398,15 +494,20 @@ class VoiceSessionManager:
         if not await self.gateway.is_online():
             raise DeviceOfflineError("device is offline")
         async with self._lock:
+            if target_user != self.state.user_id:
+                self._history.clear()
             self.state.enabled = True
             self.state.user_id = target_user
-            self._set_mode(VoiceMode.LISTENING)
+            self.state.awake = not bool(self.settings.voice_wake_word)
+            self._wake_deadline = None
+            self._set_mode(self._idle_mode())
             self.state.error = None
             self.state.transcript = None
             self.state.response_text = None
             self.state.audio_rms = 0
             self.state.audio_peak_rms = 0
             self._clear_audio()
+            self._history.clear()
             self._ignore_audio_until = time.monotonic() + 0.35
         try:
             await self.gateway.send(MessageType.START_AUDIO_STREAM)
@@ -423,6 +524,9 @@ class VoiceSessionManager:
                 self._task.cancel()
             self._task = None
             self._clear_audio()
+            self._history.clear()
+            self.state.awake = False
+            self._wake_deadline = None
             self.state.error = None
             self._set_mode(VoiceMode.STOPPED)
         if await self.gateway.is_online():
@@ -435,7 +539,7 @@ class VoiceSessionManager:
                 self._task.cancel()
             self._task = None
             self._clear_audio()
-            self._set_mode(VoiceMode.LISTENING if self.state.enabled else VoiceMode.STOPPED)
+            self._set_mode(self._idle_mode())
         if self.state.enabled and await self.gateway.is_online():
             await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
             await self.gateway.send(MessageType.START_AUDIO_STREAM)
@@ -455,12 +559,19 @@ class VoiceSessionManager:
             self._task.cancel()
         self._task = None
         self._clear_audio()
+        self._history.clear()
         self.state.enabled = False
+        self.state.awake = False
+        self._wake_deadline = None
         self._set_mode(VoiceMode.STOPPED)
 
     async def ingest_opus(self, payload: bytes) -> None:
-        if not self.state.enabled or self.state.mode != VoiceMode.LISTENING:
+        if not self.state.enabled or self.state.mode not in {
+            VoiceMode.LISTENING,
+            VoiceMode.WAITING_FOR_WAKE_WORD,
+        }:
             return
+        self._expire_wake_session()
         if time.monotonic() < self._ignore_audio_until:
             return
         self._ensure_codec()
@@ -470,7 +581,12 @@ class VoiceSessionManager:
         rms = audioop.rms(pcm, 2)
         self.state.audio_rms = rms
         self.state.audio_peak_rms = max(self.state.audio_peak_rms, rms)
-        if rms >= 350:
+        if not self._speaking_detected:
+            self._noise_rms = max(20.0, self._noise_rms * 0.96 + rms * 0.04)
+        start_threshold = min(1100, max(280, round(self._noise_rms * 3.0)))
+        continue_threshold = min(700, max(170, round(self._noise_rms * 1.7)))
+        speech_threshold = continue_threshold if self._speaking_detected else start_threshold
+        if rms >= speech_threshold:
             if not self._speaking_detected:
                 self._utterance.extend(self._pre_roll)
                 self._speaking_detected = True
@@ -480,7 +596,13 @@ class VoiceSessionManager:
         elif self._speaking_detected:
             self._utterance.append(pcm)
             self._silence_ms += 60
-            if self._silence_ms >= self.settings.voice_silence_ms:
+            duration_ms = len(self._utterance) * 60
+            required_silence_ms = (
+                max(720, self.settings.voice_silence_ms)
+                if duration_ms < 900
+                else self.settings.voice_silence_ms
+            )
+            if self._silence_ms >= required_silence_ms:
                 self._finish_utterance()
         if len(self._utterance) * 60 >= self.settings.voice_max_speech_seconds * 1000:
             self._finish_utterance()
@@ -497,10 +619,11 @@ class VoiceSessionManager:
             raise DeviceOfflineError("device is offline")
         if self._task and not self._task.done():
             raise VoiceError("a voice turn is already running")
-        self.state.turn_id += 1
         self.state.response_text = None
         self.state.error = None
-        self._task = asyncio.create_task(self._run_turn(transcript.strip(), None))
+        self._task = asyncio.create_task(
+            self._run_turn(transcript.strip(), None, enforce_wake=False)
+        )
         await self._task
         return self.state.snapshot()
 
@@ -513,48 +636,108 @@ class VoiceSessionManager:
         pcm = self._normalize_pcm(pcm)
         if self._task and not self._task.done():
             return
-        self.state.turn_id += 1
         self.state.transcript = None
         self.state.response_text = None
         self.state.error = None
         self._task = asyncio.create_task(self._run_turn(None, pcm))
 
-    async def _run_turn(self, transcript: str | None, pcm: bytes | None) -> None:
+    async def _run_turn(
+        self,
+        transcript: str | None,
+        pcm: bytes | None,
+        *,
+        enforce_wake: bool = True,
+    ) -> None:
         microphone_paused = False
+        sleep_after_reply = False
         try:
             self._ensure_provider()
             assert self.provider is not None
             if transcript is None:
                 self._set_mode(VoiceMode.TRANSCRIBING)
                 transcript = await self.provider.transcribe(self._wav(pcm or b""))
-            self.state.transcript = transcript
+            original_transcript = transcript
+            direct_answer: str | None = None
+            if self.settings.voice_wake_word and enforce_wake:
+                self._expire_wake_session()
+                wake_command = self._extract_wake_command(transcript)
+                if not self.state.awake:
+                    if wake_command is None:
+                        self.state.transcript = None
+                        self.state.response_text = None
+                        self.state.error = None
+                        self._set_mode(self._idle_mode())
+                        return
+                    self._activate_wake_session()
+                    transcript = wake_command
+                    if not transcript:
+                        direct_answer = "我在，你说吧。"
+                elif wake_command is not None:
+                    transcript = wake_command
+
+                if transcript and self._is_sleep_phrase(transcript):
+                    direct_answer = "好的，需要我时再叫我吧。"
+                    sleep_after_reply = True
+
+            self.state.turn_id += 1
+            self.state.transcript = transcript or original_transcript
             self._set_mode(VoiceMode.THINKING)
             instructions = self._instructions()
-            answer = await self.provider.answer(instructions, transcript)
-            self.state.response_text = answer
-            self._set_mode(VoiceMode.SPEAKING)
-            await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
-            microphone_paused = True
-            self._clear_audio()
-            await self.gateway.send_json(
-                MessageType.TEXT_MESSAGE,
-                {"name": "小栈", "content": answer[:240]},
-            )
-            speech_pcm = await self.provider.synthesize(answer)
-            assert self.codec is not None
-            for packet in self.codec.encode_speech(speech_pcm):
-                await self.gateway.send(MessageType.OPUS, packet)
-                await asyncio.sleep(0.06)
+            answer = ""
+            async for segment in self._response_segments(
+                instructions, transcript, direct_answer
+            ):
+                segment = self._clean_spoken_answer(segment)
+                if not segment:
+                    continue
+                speech_pcm = await self.provider.synthesize(segment)
+                if not microphone_paused:
+                    self._set_mode(VoiceMode.SPEAKING)
+                    await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
+                    microphone_paused = True
+                    self._clear_audio()
+                separator = (
+                    " "
+                    if answer
+                    and re.search(r"[A-Za-z0-9][.!?]?$", answer)
+                    and re.match(r"[A-Za-z0-9]", segment)
+                    else ""
+                )
+                answer += separator + segment
+                self.state.response_text = answer
+                await self.gateway.send_json(
+                    MessageType.TEXT_MESSAGE,
+                    {"name": "小栈", "content": answer[:240]},
+                )
+                assert self.codec is not None
+                for packet in self.codec.encode_speech(speech_pcm):
+                    await self.gateway.send(MessageType.OPUS, packet)
+                    await asyncio.sleep(0.06)
+            if not answer:
+                raise VoiceError("DeepSeek returned no spoken text")
+            if direct_answer is None:
+                self._history.extend(
+                    (
+                        {"role": "user", "content": transcript},
+                        {"role": "assistant", "content": answer},
+                    )
+                )
             await asyncio.sleep(0.24)
             if self.state.enabled and await self.gateway.is_online():
                 self._clear_audio()
                 await self.gateway.send(MessageType.START_AUDIO_STREAM)
                 self._ignore_audio_until = time.monotonic() + 1.2
                 microphone_paused = False
+            if sleep_after_reply:
+                self.state.awake = False
+                self._wake_deadline = None
+                self._history.clear()
+            elif self.state.awake:
+                self._activate_wake_session()
             self.state.error = None
-            self._set_mode(VoiceMode.LISTENING if self.state.enabled else VoiceMode.STOPPED)
+            self._set_mode(self._idle_mode())
         except asyncio.CancelledError:
-            self._set_mode(VoiceMode.LISTENING if self.state.enabled else VoiceMode.STOPPED)
+            self._set_mode(self._idle_mode())
             raise
         except NoSpeechDetected:
             self.state.transcript = None
@@ -562,7 +745,7 @@ class VoiceSessionManager:
             self.state.error = None
             self._clear_audio()
             self._ignore_audio_until = time.monotonic() + 0.5
-            self._set_mode(VoiceMode.LISTENING if self.state.enabled else VoiceMode.STOPPED)
+            self._set_mode(self._idle_mode())
         except Exception as exc:
             self.state.error = str(exc)[:240]
             self._set_mode(VoiceMode.ERROR)
@@ -575,6 +758,90 @@ class VoiceSessionManager:
                 except DeviceOfflineError:
                     pass
 
+    async def _response_segments(
+        self,
+        instructions: str,
+        transcript: str,
+        direct_answer: str | None,
+    ) -> AsyncIterator[str]:
+        assert self.provider is not None
+        if direct_answer is not None:
+            yield direct_answer
+            return
+        stream = getattr(self.provider, "answer_segments", None)
+        if stream is not None:
+            async for segment in stream(
+                instructions, transcript, list(self._history)
+            ):
+                yield segment
+            return
+        yield await self.provider.answer(
+            instructions, transcript, list(self._history)
+        )
+
+    @staticmethod
+    def _clean_spoken_answer(text: str) -> str:
+        text = re.sub(r"https?://\S+", "", text)
+        text = re.sub(r"[*_`#]+", "", text)
+        text = re.sub(
+            "[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", text
+        )
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _idle_mode(self) -> VoiceMode:
+        if not self.state.enabled:
+            return VoiceMode.STOPPED
+        if self.settings.voice_wake_word and not self.state.awake:
+            return VoiceMode.WAITING_FOR_WAKE_WORD
+        return VoiceMode.LISTENING
+
+    def _activate_wake_session(self) -> None:
+        self.state.awake = True
+        self._wake_deadline = (
+            time.monotonic() + self.settings.voice_wake_session_seconds
+        )
+
+    def _expire_wake_session(self) -> None:
+        if (
+            self.state.awake
+            and self.settings.voice_wake_word
+            and self._wake_deadline is not None
+            and time.monotonic() >= self._wake_deadline
+        ):
+            self.state.awake = False
+            self._wake_deadline = None
+            self._history.clear()
+            if self.state.mode == VoiceMode.LISTENING:
+                self._set_mode(VoiceMode.WAITING_FOR_WAKE_WORD)
+
+    def _extract_wake_command(self, transcript: str) -> str | None:
+        aliases = (self.settings.voice_wake_word, *self.settings.voice_wake_aliases)
+        text = transcript.strip()
+        for alias in aliases:
+            normalized_alias = self._normalize_phrase(alias)
+            if not normalized_alias:
+                continue
+            for end in range(1, len(text) + 1):
+                normalized_prefix = self._normalize_phrase(text[:end])
+                if normalized_prefix == normalized_alias:
+                    return text[end:].lstrip(" 　,，。.!?！？、:：;；-")
+                if len(normalized_prefix) > len(normalized_alias):
+                    break
+        return None
+
+    def _is_sleep_phrase(self, transcript: str) -> bool:
+        normalized = self._normalize_phrase(transcript)
+        return any(
+            normalized == self._normalize_phrase(phrase)
+            for phrase in self.settings.voice_sleep_phrases
+        )
+
+    @staticmethod
+    def _normalize_phrase(text: str) -> str:
+        return "".join(
+            char.lower() for char in text if char.isalnum() or "\u3400" <= char <= "\u9fff"
+        )
+
     def _instructions(self) -> str:
         preview = self.repository.prompt_preview()
         user = self.repository.get_user(self.state.user_id)
@@ -584,7 +851,10 @@ class VoiceSessionManager:
         memory_text = "\n".join(f"- {item['content']}" for item in memories) or "- 无已确认记忆"
         return (
             f"{preview['system_prompt']}\n\n"
-            "当前是语音对话。只输出适合直接朗读的回答，不输出 Markdown、URL、JSON 或内部过程。\n"
+            "当前是面对面语音对话。像熟悉的家人一样自然回应，不要重复用户的问题，"
+            "不要用“当然可以”“很高兴帮助你”等客套开场。默认只说 1–2 个短句，"
+            "用自然停顿的标点；需要时再问一个简短的跟进问题。不输出表情符号、"
+            "Markdown、URL、JSON 或内部过程。\n"
             f"当前用户：{user['display_name']}；角色：{user['role']}；语言偏好：{user['locale']}。\n"
             f"仅可使用该用户自己的已确认记忆：\n{memory_text}"
         )

@@ -154,11 +154,19 @@ class VoiceTextTurn(BaseModel):
 
 class VoiceStateResponse(BaseModel):
     mode: Literal[
-        "stopped", "listening", "transcribing", "thinking", "speaking", "error"
+        "stopped",
+        "waiting_for_wake_word",
+        "listening",
+        "transcribing",
+        "thinking",
+        "speaking",
+        "error",
     ]
     enabled: bool
     user_id: str
     turn_id: int
+    wake_word: str = ""
+    awake: bool = False
     transcript: str | None = None
     response_text: str | None = None
     error: str | None = None

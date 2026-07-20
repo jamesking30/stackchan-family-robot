@@ -15,21 +15,32 @@ WS_PATH = "/stackChan/ws?deviceType=StackChan"
 
 
 class FakeVoiceProvider:
-    def __init__(self):
+    def __init__(self, transcript: str = "小栈小栈，你好"):
         self.instructions = ""
         self.transcript = ""
+        self.transcribed_text = transcript
+        self.transcribe_calls = 0
+        self.answer_calls = 0
+        self.synthesized_text = ""
 
     async def transcribe(self, wav_audio: bytes) -> str:
         assert wav_audio.startswith(b"RIFF")
-        return "你好，小栈"
+        self.transcribe_calls += 1
+        return self.transcribed_text
 
-    async def answer(self, instructions: str, transcript: str) -> str:
+    async def answer(
+        self,
+        instructions: str,
+        transcript: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> str:
+        self.answer_calls += 1
         self.instructions = instructions
         self.transcript = transcript
         return "你好！很高兴见到你。"
 
     async def synthesize(self, text: str) -> bytes:
-        assert text == "你好！很高兴见到你。"
+        self.synthesized_text = text
         return b"\x00\x00" * 1440
 
 
@@ -67,7 +78,9 @@ def test_bilingual_voice_turn_stays_in_memory_and_reaches_robot(tmp_path: Path):
                 json={"user_id": "user-2"},
             )
             assert response.status_code == 200
-            assert response.json()["mode"] == "listening"
+            assert response.json()["mode"] == "waiting_for_wake_word"
+            assert response.json()["wake_word"] == "小栈小栈"
+            assert response.json()["awake"] is False
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.START_AUDIO_STREAM
             time.sleep(0.4)
 
@@ -95,15 +108,84 @@ def test_bilingual_voice_turn_stays_in_memory_and_reaches_robot(tmp_path: Path):
             assert audio_frame.message_type == MessageType.OPUS
             assert audio_frame.payload == b"speaker-opus"
             assert microphone_resume.message_type == MessageType.START_AUDIO_STREAM
-            assert state["transcript"] == "你好，小栈"
+            assert state["transcript"] == "你好"
             assert state["response_text"] == "你好！很高兴见到你。"
-            assert provider.transcript == "你好，小栈"
+            assert state["awake"] is True
+            assert provider.transcript == "你好"
             assert "角色：unassigned" in provider.instructions
             assert "家庭与儿童安全优先级" in provider.instructions
 
             stopped = client.post("/v1/voice/stop", headers=ADMIN_HEADERS).json()
             assert stopped["mode"] == "stopped"
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.STOP_AUDIO_STREAM
+
+
+def test_background_speech_does_not_reach_deepseek(tmp_path: Path):
+    provider = FakeVoiceProvider("今天晚上吃什么")
+    settings = Settings(
+        db_path=tmp_path / "wake-gate.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        admin_api_key="admin-secret",
+        device_api_key="device-secret",
+        voice_min_speech_ms=300,
+    )
+    with TestClient(
+        create_app(settings, voice_provider=provider, voice_codec=FakeOpusCodec())
+    ) as client:
+        with client.websocket_connect(WS_PATH, headers=DEVICE_HEADERS) as websocket:
+            state = client.post(
+                "/v1/voice/start",
+                headers=ADMIN_HEADERS,
+                json={"user_id": "user-2"},
+            ).json()
+            assert state["mode"] == "waiting_for_wake_word"
+            assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.START_AUDIO_STREAM
+            time.sleep(0.4)
+
+            for _ in range(6):
+                websocket.send_bytes(pack_frame(MessageType.OPUS, b"microphone-opus"))
+            for _ in range(13):
+                websocket.send_bytes(pack_frame(MessageType.OPUS, b"silence-opus"))
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and provider.transcribe_calls == 0:
+                time.sleep(0.01)
+            while time.monotonic() < deadline:
+                state = client.get("/v1/voice/state", headers=ADMIN_HEADERS).json()
+                if provider.transcribe_calls and state["mode"] == "waiting_for_wake_word":
+                    break
+                time.sleep(0.01)
+
+            assert provider.transcribe_calls == 1
+            assert state["awake"] is False
+            assert state["turn_id"] == 0
+            assert state["transcript"] is None
+            assert state["response_text"] is None
+            assert provider.answer_calls == 0
+
+
+def test_wake_word_variants_and_sleep_phrases(tmp_path: Path):
+    settings = Settings(
+        db_path=tmp_path / "wake-parser.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+    )
+    manager = VoiceSessionManager(settings, None, None)  # type: ignore[arg-type]
+
+    assert manager._extract_wake_command("小栈，小栈！今天天气怎么样") == "今天天气怎么样"
+    assert manager._extract_wake_command("小站小站 讲个故事") == "讲个故事"
+    assert manager._extract_wake_command("Stack Chan, hello") == "hello"
+    assert manager._extract_wake_command("我在说小栈小栈") is None
+    assert manager._is_sleep_phrase("休息吧！") is True
+
+
+def test_spoken_answer_removes_markup_urls_and_emoji():
+    cleaned = VoiceSessionManager._clean_spoken_answer(
+        "**好的** 😊 详见 https://example.com/test"
+    )
+
+    assert cleaned == "好的 详见"
 
 
 def test_voice_requires_online_device_and_admin_key(tmp_path: Path):

@@ -78,3 +78,37 @@ def test_local_whisper_rejects_silence_and_out_of_scope_hallucinations(text: str
 
 def test_local_whisper_accepts_chinese_and_english():
     assert LocalDeepSeekVoiceProvider._clean_transcript("  你好， StackChan  ") == "你好， StackChan"
+    assert LocalDeepSeekVoiceProvider._clean_transcript("HelloHello") == "Hello"
+
+
+def test_local_whisper_rejects_repeated_out_of_scope_characters():
+    with pytest.raises(NoSpeechDetected):
+        LocalDeepSeekVoiceProvider._clean_transcript("ლლლლლლლ")
+
+
+def test_deepseek_messages_include_bounded_conversation_history():
+    messages = LocalDeepSeekVoiceProvider._messages(
+        "system rules",
+        "那第二个呢？",
+        [
+            {"role": "user", "content": "给我两个选择"},
+            {"role": "assistant", "content": "第一个是画画，第二个是拼图。"},
+        ],
+    )
+
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert messages[-1]["content"] == "那第二个呢？"
+
+
+def test_streaming_answer_is_split_on_natural_sentence_boundaries():
+    segments, tail = LocalDeepSeekVoiceProvider._pop_spoken_segments(
+        "我们先画一只猫。然后给它加上帽子！还有一点"
+    )
+
+    assert segments == ["我们先画一只猫。", "然后给它加上帽子！"]
+    assert tail == "还有一点"
