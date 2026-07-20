@@ -73,6 +73,7 @@ class LocalDeepSeekVoiceProvider:
         self.tts_model = settings.voice_tts_model
         self.tts_speaker = settings.voice_tts_speaker
         self.tts_instruction = settings.voice_tts_instruction
+        self.tts_speed = settings.voice_tts_speed
         self.tts_fallback_to_system = settings.voice_tts_fallback_to_system
 
         if shutil.which(self.whisper_binary) is None:
@@ -271,7 +272,7 @@ class LocalDeepSeekVoiceProvider:
                     "lang_code": language,
                     "response_format": "wav",
                     "stream": False,
-                    "speed": 1.0,
+                    "speed": self.tts_speed,
                     "max_tokens": max_tokens,
                     "repetition_penalty": 1.05,
                 },

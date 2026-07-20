@@ -34,8 +34,9 @@ class Settings:
     voice_en_name: str = "Samantha"
     voice_tts_base_url: str = "http://127.0.0.1:8766"
     voice_tts_model: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
-    voice_tts_speaker: str = "Serena"
-    voice_tts_instruction: str = "温暖、自然、亲切，像熟悉的家人一样说话。"
+    voice_tts_speaker: str = "Vivian"
+    voice_tts_instruction: str = "明亮、轻快、活泼、有精神，语速稍快，句尾干净利落；保持亲切自然，不要慵懒拖音，不要尖叫或夸张卖萌。"
+    voice_tts_speed: float = 1.08
     voice_tts_fallback_to_system: bool = True
     voice_silence_ms: int = 600
     voice_min_speech_ms: int = 300
@@ -92,11 +93,12 @@ class Settings:
                 "ROBOT_VOICE_TTS_MODEL",
                 "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
             ),
-            voice_tts_speaker=os.getenv("ROBOT_VOICE_TTS_SPEAKER", "Serena"),
+            voice_tts_speaker=os.getenv("ROBOT_VOICE_TTS_SPEAKER", "Vivian"),
             voice_tts_instruction=os.getenv(
                 "ROBOT_VOICE_TTS_INSTRUCTION",
-                "温暖、自然、亲切，像熟悉的家人一样说话。",
+                "明亮、轻快、活泼、有精神，语速稍快，句尾干净利落；保持亲切自然，不要慵懒拖音，不要尖叫或夸张卖萌。",
             ),
+            voice_tts_speed=float(os.getenv("ROBOT_VOICE_TTS_SPEED", "1.08")),
             voice_tts_fallback_to_system=os.getenv(
                 "ROBOT_VOICE_TTS_FALLBACK_TO_SYSTEM", "true"
             ).lower()
