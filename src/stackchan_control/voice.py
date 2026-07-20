@@ -69,6 +69,11 @@ class LocalDeepSeekVoiceProvider:
         self.whisper_model = settings.voice_whisper_model
         self.zh_voice = settings.voice_zh_name
         self.en_voice = settings.voice_en_name
+        self.tts_base_url = settings.voice_tts_base_url
+        self.tts_model = settings.voice_tts_model
+        self.tts_speaker = settings.voice_tts_speaker
+        self.tts_instruction = settings.voice_tts_instruction
+        self.tts_fallback_to_system = settings.voice_tts_fallback_to_system
 
         if shutil.which(self.whisper_binary) is None:
             raise VoiceError(f"local Whisper binary was not found: {self.whisper_binary}")
@@ -242,6 +247,44 @@ class LocalDeepSeekVoiceProvider:
         return segments, buffer[start:]
 
     async def synthesize(self, text: str) -> bytes:
+        if self.tts_base_url:
+            try:
+                return await self._synthesize_neural(text)
+            except Exception:
+                if not self.tts_fallback_to_system:
+                    raise
+        return await self._synthesize_system(text)
+
+    async def _synthesize_neural(self, text: str) -> bytes:
+        language = "Chinese" if re.search(r"[\u3400-\u9fff]", text) else "English"
+        chinese_chars = len(re.findall(r"[\u3400-\u9fff]", text))
+        latin_words = len(re.findall(r"[A-Za-z0-9]+", text))
+        max_tokens = min(280, max(48, chinese_chars * 4 + latin_words * 8 + 24))
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(
+                f"{self.tts_base_url}/v1/audio/speech",
+                json={
+                    "model": self.tts_model,
+                    "input": text,
+                    "voice": self.tts_speaker,
+                    "instruct": self.tts_instruction,
+                    "lang_code": language,
+                    "response_format": "wav",
+                    "stream": False,
+                    "speed": 1.0,
+                    "max_tokens": max_tokens,
+                    "repetition_penalty": 1.05,
+                },
+            )
+        if not response.is_success:
+            raise VoiceError(
+                f"local neural TTS failed with HTTP {response.status_code}"
+            )
+        if not response.content:
+            raise VoiceError("local neural TTS returned no audio")
+        return await self._convert_audio_to_pcm(response.content)
+
+    async def _synthesize_system(self, text: str) -> bytes:
         voice = self.zh_voice if re.search(r"[\u3400-\u9fff]", text) else self.en_voice
         with tempfile.TemporaryDirectory(prefix="stackchan-tts-") as temp_dir:
             aiff_path = Path(temp_dir) / "speech.aiff"
@@ -261,32 +304,39 @@ class LocalDeepSeekVoiceProvider:
             if say_process.returncode != 0:
                 detail = say_stderr.decode("utf-8", errors="replace").strip()[-240:]
                 raise VoiceError(f"local speech synthesis failed: {detail}")
-
-            convert_process = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-nostdin",
-                "-v",
-                "error",
-                "-i",
-                str(aiff_path),
-                "-f",
-                "s16le",
-                "-acodec",
-                "pcm_s16le",
-                "-ar",
-                "24000",
-                "-ac",
-                "1",
-                "pipe:1",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            pcm, convert_stderr = await convert_process.communicate()
-            if convert_process.returncode != 0:
-                detail = convert_stderr.decode("utf-8", errors="replace").strip()[-240:]
-                raise VoiceError(f"local audio conversion failed: {detail}")
+            pcm = await self._convert_audio_to_pcm(aiff_path.read_bytes())
         if not pcm:
             raise VoiceError("local speech synthesis returned no audio")
+        return pcm
+
+    @staticmethod
+    async def _convert_audio_to_pcm(audio: bytes) -> bytes:
+        convert_process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "24000",
+            "-ac",
+            "1",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        pcm, convert_stderr = await convert_process.communicate(audio)
+        if convert_process.returncode != 0:
+            detail = convert_stderr.decode("utf-8", errors="replace").strip()[-240:]
+            raise VoiceError(f"local audio conversion failed: {detail}")
+        if not pcm:
+            raise VoiceError("local audio conversion returned no PCM")
         return pcm
 
     @staticmethod

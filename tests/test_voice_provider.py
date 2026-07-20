@@ -34,6 +34,27 @@ class FakeDeepSeekClient:
         )
 
 
+class FakeNeuralTtsClient:
+    request_json: dict[str, object] | None = None
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def post(self, url: str, **kwargs):
+        type(self).request_json = kwargs["json"]
+        return httpx.Response(
+            200,
+            content=b"RIFF-fake-wav",
+            request=httpx.Request("POST", url),
+        )
+
+
 def test_deepseek_text_provider_uses_v4_without_thinking(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -112,3 +133,36 @@ def test_streaming_answer_is_split_on_natural_sentence_boundaries():
 
     assert segments == ["我们先画一只猫。", "然后给它加上帽子！"]
     assert tail == "还有一点"
+
+
+def test_local_neural_tts_uses_qwen_serena_and_bounded_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    model_path = tmp_path / "ggml-small.bin"
+    model_path.write_bytes(b"model")
+    monkeypatch.setattr("stackchan_control.voice.shutil.which", lambda _: "/usr/bin/tool")
+    monkeypatch.setattr("stackchan_control.voice.httpx.AsyncClient", FakeNeuralTtsClient)
+
+    async def fake_convert(_provider, audio: bytes) -> bytes:
+        assert audio == b"RIFF-fake-wav"
+        return b"pcm"
+
+    monkeypatch.setattr(
+        LocalDeepSeekVoiceProvider, "_convert_audio_to_pcm", fake_convert
+    )
+    settings = Settings(
+        db_path=tmp_path / "voice.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        deepseek_api_key="secret",
+        voice_whisper_model=model_path,
+    )
+
+    provider = LocalDeepSeekVoiceProvider(settings)
+    pcm = asyncio.run(provider._synthesize_neural("你好，我是波西。"))
+
+    assert pcm == b"pcm"
+    assert FakeNeuralTtsClient.request_json is not None
+    assert FakeNeuralTtsClient.request_json["voice"] == "Serena"
+    assert FakeNeuralTtsClient.request_json["lang_code"] == "Chinese"
+    assert FakeNeuralTtsClient.request_json["max_tokens"] == 48

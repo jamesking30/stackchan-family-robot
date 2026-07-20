@@ -15,7 +15,7 @@ WS_PATH = "/stackChan/ws?deviceType=StackChan"
 
 
 class FakeVoiceProvider:
-    def __init__(self, transcript: str = "小栈小栈，你好"):
+    def __init__(self, transcript: str = "波西，你好"):
         self.instructions = ""
         self.transcript = ""
         self.transcribed_text = transcript
@@ -79,7 +79,7 @@ def test_bilingual_voice_turn_stays_in_memory_and_reaches_robot(tmp_path: Path):
             )
             assert response.status_code == 200
             assert response.json()["mode"] == "waiting_for_wake_word"
-            assert response.json()["wake_word"] == "小栈小栈"
+            assert response.json()["wake_word"] == "波西"
             assert response.json()["awake"] is False
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.START_AUDIO_STREAM
             time.sleep(0.4)
@@ -173,10 +173,10 @@ def test_wake_word_variants_and_sleep_phrases(tmp_path: Path):
     )
     manager = VoiceSessionManager(settings, None, None)  # type: ignore[arg-type]
 
-    assert manager._extract_wake_command("小栈，小栈！今天天气怎么样") == "今天天气怎么样"
-    assert manager._extract_wake_command("小站小站 讲个故事") == "讲个故事"
-    assert manager._extract_wake_command("Stack Chan, hello") == "hello"
-    assert manager._extract_wake_command("我在说小栈小栈") is None
+    assert manager._extract_wake_command("波西！今天天气怎么样") == "今天天气怎么样"
+    assert manager._extract_wake_command("波希 讲个故事") == "讲个故事"
+    assert manager._extract_wake_command("Bo Xi, hello") == "hello"
+    assert manager._extract_wake_command("我在说波西") is None
     assert manager._is_sleep_phrase("休息吧！") is True
 
 
