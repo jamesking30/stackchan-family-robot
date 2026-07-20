@@ -217,3 +217,16 @@ def test_quiet_microphone_pcm_is_centered_and_amplified():
 
     assert int.from_bytes(normalized[:2], "little", signed=True) == -12000
     assert int.from_bytes(normalized[2:4], "little", signed=True) == 12000
+
+
+def test_synthesized_speech_is_peak_normalized_to_full_scale():
+    pcm = b"".join(
+        sample.to_bytes(2, "little", signed=True) for sample in (-10000, 10000) * 32
+    )
+
+    maximized = VoiceSessionManager._maximize_speech_pcm(pcm)
+
+    assert 32690 <= max(
+        abs(int.from_bytes(maximized[index : index + 2], "little", signed=True))
+        for index in range(0, len(maximized), 2)
+    ) <= 32700

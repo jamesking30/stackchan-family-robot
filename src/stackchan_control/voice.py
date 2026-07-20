@@ -741,6 +741,7 @@ class VoiceSessionManager:
                 if not segment:
                     continue
                 speech_pcm = await self.provider.synthesize(segment)
+                speech_pcm = self._maximize_speech_pcm(speech_pcm)
                 if not microphone_paused:
                     self._set_mode(VoiceMode.SPEAKING)
                     await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
@@ -929,6 +930,17 @@ class VoiceSessionManager:
             return centered
         gain = min(12.0, 24000 / peak)
         return audioop.mul(centered, 2, gain)
+
+    @staticmethod
+    def _maximize_speech_pcm(pcm: bytes) -> bytes:
+        """Peak-normalize synthesized speech to safe 16-bit full scale."""
+        if not pcm:
+            return pcm
+        peak = audioop.max(pcm, 2)
+        if peak < 1:
+            return pcm
+        gain = min(8.0, 32700 / peak)
+        return audioop.mul(pcm, 2, gain)
 
     @staticmethod
     def _wav(pcm: bytes) -> bytes:
