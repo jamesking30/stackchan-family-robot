@@ -29,7 +29,7 @@ class FakeDeepSeekClient:
         type(self).request_json = kwargs["json"]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": "你好，我是小栈。"}}]},
+            json={"choices": [{"message": {"content": "你好，我是波西。"}}]},
             request=httpx.Request("POST", url),
         )
 
@@ -74,7 +74,7 @@ def test_deepseek_text_provider_uses_v4_without_thinking(
     provider = LocalDeepSeekVoiceProvider(settings)
     answer = asyncio.run(provider.answer("system rules", "你好"))
 
-    assert answer == "你好，我是小栈。"
+    assert answer == "你好，我是波西。"
     assert FakeDeepSeekClient.request_url == "https://api.deepseek.com/chat/completions"
     assert FakeDeepSeekClient.request_json == {
         "model": "deepseek-v4-flash",

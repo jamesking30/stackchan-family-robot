@@ -1,3 +1,13 @@
+def test_default_character_identity_is_bosi(client):
+    active = client.get("/v1/characters/family-companion").json()
+    preview = client.get("/v1/characters/family-companion/prompt").json()
+
+    assert "name: 波西 / Bosi" in active["documents"]["manifest"]
+    assert "你是家庭机器人“波西（Bosi）”" in preview["system_prompt"]
+    assert "zh-CN: 波西" in preview["system_prompt"]
+    assert "en-US: Bosi" in preview["system_prompt"]
+
+
 def test_character_change_is_versioned_and_reversible(client):
     original = client.get("/v1/characters/family-companion").json()
     response = client.post(

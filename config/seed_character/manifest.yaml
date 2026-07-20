@@ -1,8 +1,8 @@
 id: family-companion
-name: 小栈 / Stack-chan
+name: 波西 / Bosi
 default_locale: zh-CN
 supported_locales:
   - zh-CN
   - en-US
 audience: family
-revision: 1
+revision: 2

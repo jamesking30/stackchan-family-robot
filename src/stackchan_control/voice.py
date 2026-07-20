@@ -757,7 +757,7 @@ class VoiceSessionManager:
                 self.state.response_text = answer
                 await self.gateway.send_json(
                     MessageType.TEXT_MESSAGE,
-                    {"name": "小栈", "content": answer[:240]},
+                    {"name": "波西", "content": answer[:240]},
                 )
                 assert self.codec is not None
                 for packet in self.codec.encode_speech(speech_pcm):
