@@ -15,7 +15,7 @@
 - Codex/OpenClaw 任务状态自动同步到在线机器人；
 - 设备专用密钥、Mac 本地 OTA 检查与可审计的产品固件构建。
 - 设备侧 VAD、16kHz Opus 麦克风流与 24kHz Opus 扬声器播放。
-- 本地 Whisper 转写、DeepSeek 回答和 macOS 本地语音合成的会话编排。
+- 本地 Whisper 转写、DeepSeek 回答和 GPT-SoVITS 克隆音色的会话编排。
 - 语音打断、用户隔离提示、儿童安全规则和可热替换模型配置。
 
 ## 本地启动
@@ -38,6 +38,9 @@ stackchan-control
 ```bash
 pytest
 ```
+
+GPT-SoVITS 音色安装、macOS 开机自启和网络可靠性说明见
+[`docs/operations-reliability.md`](docs/operations-reliability.md)。
 
 ## 管理操作
 

@@ -11,6 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+def project_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 @dataclass(frozen=True)
 class Settings:
     db_path: Path
@@ -32,6 +37,14 @@ class Settings:
     voice_whisper_model: Path = PROJECT_ROOT / "var/models/ggml-small.bin"
     voice_zh_name: str = "Tingting"
     voice_en_name: str = "Samantha"
+    voice_tts_provider: str = "gpt_sovits"
+    voice_gpt_sovits_base_url: str = "http://127.0.0.1:9880"
+    voice_gpt_sovits_ref_audio: Path = (
+        PROJECT_ROOT / "var/models/gpt-sovits/elysia/reference-happy.wav"
+    )
+    voice_gpt_sovits_prompt_text: str = "所以你今天就来见我了吗？哇，真令人开心呢。"
+    voice_gpt_sovits_prompt_lang: str = "zh"
+    voice_gpt_sovits_speed: float = 1.08
     voice_tts_base_url: str = "http://127.0.0.1:8766"
     voice_tts_model: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
     voice_tts_speaker: str = "Vivian"
@@ -78,14 +91,39 @@ class Settings:
             voice_whisper_binary=os.getenv(
                 "ROBOT_VOICE_WHISPER_BINARY", "whisper-cli"
             ),
-            voice_whisper_model=Path(
+            voice_whisper_model=project_path(
                 os.getenv(
                     "ROBOT_VOICE_WHISPER_MODEL",
                     str(PROJECT_ROOT / "var/models/ggml-small.bin"),
                 )
-            ).expanduser(),
+            ),
             voice_zh_name=os.getenv("ROBOT_VOICE_ZH_NAME", "Tingting"),
             voice_en_name=os.getenv("ROBOT_VOICE_EN_NAME", "Samantha"),
+            voice_tts_provider=os.getenv(
+                "ROBOT_VOICE_TTS_PROVIDER", "gpt_sovits"
+            ).strip().lower(),
+            voice_gpt_sovits_base_url=os.getenv(
+                "ROBOT_VOICE_GPT_SOVITS_BASE_URL", "http://127.0.0.1:9880"
+            ).rstrip("/"),
+            voice_gpt_sovits_ref_audio=project_path(
+                os.getenv(
+                    "ROBOT_VOICE_GPT_SOVITS_REF_AUDIO",
+                    str(
+                        PROJECT_ROOT
+                        / "var/models/gpt-sovits/elysia/reference-happy.wav"
+                    ),
+                )
+            ),
+            voice_gpt_sovits_prompt_text=os.getenv(
+                "ROBOT_VOICE_GPT_SOVITS_PROMPT_TEXT",
+                "所以你今天就来见我了吗？哇，真令人开心呢。",
+            ),
+            voice_gpt_sovits_prompt_lang=os.getenv(
+                "ROBOT_VOICE_GPT_SOVITS_PROMPT_LANG", "zh"
+            ),
+            voice_gpt_sovits_speed=float(
+                os.getenv("ROBOT_VOICE_GPT_SOVITS_SPEED", "1.08")
+            ),
             voice_tts_base_url=os.getenv(
                 "ROBOT_VOICE_TTS_BASE_URL", "http://127.0.0.1:8766"
             ).rstrip("/"),

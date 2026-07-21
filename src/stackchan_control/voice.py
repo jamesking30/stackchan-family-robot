@@ -6,6 +6,7 @@ import ctypes
 import ctypes.util
 import io
 import json
+import logging
 import re
 import shutil
 import tempfile
@@ -23,6 +24,9 @@ import httpx
 from .gateway import DeviceOfflineError, MessageType, StackChanGateway
 from .repository import RobotRepository
 from .settings import Settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class VoiceError(RuntimeError):
@@ -69,6 +73,12 @@ class LocalDeepSeekVoiceProvider:
         self.whisper_model = settings.voice_whisper_model
         self.zh_voice = settings.voice_zh_name
         self.en_voice = settings.voice_en_name
+        self.tts_provider = settings.voice_tts_provider
+        self.gpt_sovits_base_url = settings.voice_gpt_sovits_base_url
+        self.gpt_sovits_ref_audio = settings.voice_gpt_sovits_ref_audio
+        self.gpt_sovits_prompt_text = settings.voice_gpt_sovits_prompt_text
+        self.gpt_sovits_prompt_lang = settings.voice_gpt_sovits_prompt_lang
+        self.gpt_sovits_speed = settings.voice_gpt_sovits_speed
         self.tts_base_url = settings.voice_tts_base_url
         self.tts_model = settings.voice_tts_model
         self.tts_speaker = settings.voice_tts_speaker
@@ -248,13 +258,52 @@ class LocalDeepSeekVoiceProvider:
         return segments, buffer[start:]
 
     async def synthesize(self, text: str) -> bytes:
+        if self.tts_provider == "gpt_sovits" and self.gpt_sovits_base_url:
+            try:
+                return await self._synthesize_gpt_sovits(text)
+            except Exception as exc:
+                logger.warning("GPT-SoVITS failed; using local fallback: %s", exc)
         if self.tts_base_url:
             try:
                 return await self._synthesize_neural(text)
-            except Exception:
-                if not self.tts_fallback_to_system:
-                    raise
+            except Exception as exc:
+                logger.warning("Qwen TTS failed; using system fallback: %s", exc)
+        if not self.tts_fallback_to_system:
+            raise VoiceError("all configured local speech synthesis services failed")
         return await self._synthesize_system(text)
+
+    async def _synthesize_gpt_sovits(self, text: str) -> bytes:
+        if not self.gpt_sovits_ref_audio.is_file():
+            raise VoiceError(
+                f"GPT-SoVITS reference audio was not found: {self.gpt_sovits_ref_audio}"
+            )
+        text_lang = "zh" if re.search(r"[\u3400-\u9fff]", text) else "en"
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(
+                f"{self.gpt_sovits_base_url}/tts",
+                json={
+                    "text": text,
+                    "text_lang": text_lang,
+                    "ref_audio_path": str(self.gpt_sovits_ref_audio),
+                    "prompt_text": self.gpt_sovits_prompt_text,
+                    "prompt_lang": self.gpt_sovits_prompt_lang,
+                    "text_split_method": "cut5",
+                    "batch_size": 1,
+                    "speed_factor": self.gpt_sovits_speed,
+                    "media_type": "wav",
+                    "streaming_mode": False,
+                    "parallel_infer": True,
+                    "repetition_penalty": 1.35,
+                },
+            )
+        if not response.is_success:
+            detail = response.text.strip()[-240:]
+            raise VoiceError(
+                f"GPT-SoVITS failed with HTTP {response.status_code}: {detail}"
+            )
+        if not response.content:
+            raise VoiceError("GPT-SoVITS returned no audio")
+        return await self._convert_audio_to_pcm(response.content)
 
     async def _synthesize_neural(self, text: str) -> bytes:
         language = "Chinese" if re.search(r"[\u3400-\u9fff]", text) else "English"

@@ -55,6 +55,29 @@ class FakeNeuralTtsClient:
         )
 
 
+class FakeGptSovitsClient:
+    request_json: dict[str, object] | None = None
+    request_url: str | None = None
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def post(self, url: str, **kwargs):
+        type(self).request_url = url
+        type(self).request_json = kwargs["json"]
+        return httpx.Response(
+            200,
+            content=b"RIFF-gpt-sovits-wav",
+            request=httpx.Request("POST", url),
+        )
+
+
 def test_deepseek_text_provider_uses_v4_without_thinking(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -167,3 +190,42 @@ def test_local_neural_tts_uses_qwen_serena_and_bounded_tokens(
     assert FakeNeuralTtsClient.request_json["speed"] == 1.08
     assert FakeNeuralTtsClient.request_json["lang_code"] == "Chinese"
     assert FakeNeuralTtsClient.request_json["max_tokens"] == 48
+
+
+def test_gpt_sovits_uses_trained_voice_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    model_path = tmp_path / "ggml-small.bin"
+    model_path.write_bytes(b"model")
+    reference_path = tmp_path / "reference.wav"
+    reference_path.write_bytes(b"RIFF-reference")
+    monkeypatch.setattr("stackchan_control.voice.shutil.which", lambda _: "/usr/bin/tool")
+    monkeypatch.setattr("stackchan_control.voice.httpx.AsyncClient", FakeGptSovitsClient)
+
+    async def fake_convert(_provider, audio: bytes) -> bytes:
+        assert audio == b"RIFF-gpt-sovits-wav"
+        return b"pcm"
+
+    monkeypatch.setattr(
+        LocalDeepSeekVoiceProvider, "_convert_audio_to_pcm", fake_convert
+    )
+    settings = Settings(
+        db_path=tmp_path / "voice.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        deepseek_api_key="secret",
+        voice_whisper_model=model_path,
+        voice_gpt_sovits_ref_audio=reference_path,
+    )
+
+    provider = LocalDeepSeekVoiceProvider(settings)
+    pcm = asyncio.run(provider._synthesize_gpt_sovits("你好，我是波西。"))
+
+    assert pcm == b"pcm"
+    assert FakeGptSovitsClient.request_url == "http://127.0.0.1:9880/tts"
+    assert FakeGptSovitsClient.request_json is not None
+    assert FakeGptSovitsClient.request_json["text_lang"] == "zh"
+    assert FakeGptSovitsClient.request_json["prompt_text"] == (
+        "所以你今天就来见我了吗？哇，真令人开心呢。"
+    )
+    assert FakeGptSovitsClient.request_json["speed_factor"] == 1.08
