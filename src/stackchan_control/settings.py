@@ -54,8 +54,17 @@ class Settings:
     voice_silence_ms: int = 600
     voice_min_speech_ms: int = 300
     voice_max_speech_seconds: int = 15
-    voice_wake_word: str = "波西"
-    voice_wake_aliases: tuple[str, ...] = ("波希", "波惜", "Bo Xi", "Bosi")
+    voice_wake_word: str = "爱莉"
+    voice_wake_aliases: tuple[str, ...] = (
+        "艾莉",
+        "爱丽",
+        "艾丽",
+        "爱里",
+        "爱莉希雅",
+        "Ai Li",
+        "Aili",
+        "Ellie",
+    )
     voice_wake_session_seconds: float = 45.0
     voice_sleep_phrases: tuple[str, ...] = ("再见", "休息吧", "不用了")
 
@@ -146,11 +155,12 @@ class Settings:
             voice_max_speech_seconds=int(
                 os.getenv("ROBOT_VOICE_MAX_SPEECH_SECONDS", "15")
             ),
-            voice_wake_word=os.getenv("ROBOT_VOICE_WAKE_WORD", "波西").strip(),
+            voice_wake_word=os.getenv("ROBOT_VOICE_WAKE_WORD", "爱莉").strip(),
             voice_wake_aliases=tuple(
                 item.strip()
                 for item in os.getenv(
-                    "ROBOT_VOICE_WAKE_ALIASES", "波希,波惜,Bo Xi,Bosi"
+                    "ROBOT_VOICE_WAKE_ALIASES",
+                    "艾莉,爱丽,艾丽,爱里,爱莉希雅,Ai Li,Aili,Ellie",
                 ).split(",")
                 if item.strip()
             ),

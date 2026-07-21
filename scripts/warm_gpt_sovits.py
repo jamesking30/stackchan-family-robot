@@ -28,7 +28,7 @@ def main() -> int:
 
     payload = json.dumps(
         {
-            "text": "波西准备好了！",
+            "text": "爱莉准备好了！",
             "text_lang": "zh",
             "ref_audio_path": str(REFERENCE),
             "prompt_text": "所以你今天就来见我了吗？哇，真令人开心呢。",

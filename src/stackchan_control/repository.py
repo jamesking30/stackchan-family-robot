@@ -523,7 +523,7 @@ class RobotRepository:
                 """
             ).fetchone()
         if not task:
-            return {"mode": "idle", "emotion": "neutral", "title": "波西已就绪", "subtitle": "Bosi is ready", "progress": None, "source": None, "task_id": None}
+            return {"mode": "idle", "emotion": "neutral", "title": "爱莉已就绪", "subtitle": "Aili is ready", "progress": None, "source": None, "task_id": None}
         item = dict(task)
         if item["status"] in {"running", "waiting", "queued"}:
             default_emotion = "thinking" if item["status"] != "waiting" else "concerned"

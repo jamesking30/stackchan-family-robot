@@ -1,8 +1,8 @@
 id: family-companion
-name: 波西 / Bosi
+name: 爱莉 / Aili
 default_locale: zh-CN
 supported_locales:
   - zh-CN
   - en-US
 audience: family
-revision: 2
+revision: 3

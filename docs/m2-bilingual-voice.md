@@ -11,7 +11,7 @@ M2 采用 Mac 编排、StackChan 实时采播的本地优先结构：
 5. Mac 上的 GPT-SoVITS v2 使用已训练音色在本地合成语音，再转换为 24kHz PCM、编码成 60ms Opus 帧下发；回答文字同时显示在脸部界面。Qwen3-TTS 是自动备用音色。
 6. 播放回答期间暂停麦克风，播放结束并经过保护间隔后恢复监听，防止机器人听到自己的扬声器而循环回答。
 
-语音服务启动后默认处于本地唤醒检测状态。只有句首出现“波西”或已配置的同音识别别名时才开始对话；唤醒后 45 秒内可连续对话，每次有效交互会续期。说“再见”“休息吧”或“不用了”会立即回到待唤醒状态。未唤醒的环境语音只在 Mac 本地做短暂转写检测，不发送给 DeepSeek，也不进入记忆。
+语音服务启动后默认处于本地唤醒检测状态。只有句首出现“爱莉”或已配置的同音识别别名时才开始对话；唤醒后 45 秒内可连续对话，每次有效交互会续期。说“再见”“休息吧”或“不用了”会立即回到待唤醒状态。未唤醒的环境语音只在 Mac 本地做短暂转写检测，不发送给 DeepSeek，也不进入记忆。
 
 CoreS3 当前没有达到可靠全双工回声消除，因此播放回答时会暂停硬件麦克风，播完后经过保护间隔再恢复。主机侧能量 VAD 负责完整句尾检测；转写前会移除直流偏置并归一化低音量录音。本地 Whisper 自动识别失败时依次在本机重试中文和英文，空音频、韩语静音幻觉及常见“字幕制作”幻觉会被丢弃，不发送给 DeepSeek。下行 TTS 在 Opus 编码前做安全满幅峰值归一化，以充分使用扬声器的数字动态范围。
 
@@ -51,8 +51,8 @@ ROBOT_VOICE_TTS_SPEAKER=Vivian
 ROBOT_VOICE_TTS_INSTRUCTION=明亮、轻快、活泼、有精神，语速稍快，句尾干净利落；保持亲切自然，不要慵懒拖音，不要尖叫或夸张卖萌。
 ROBOT_VOICE_TTS_SPEED=1.08
 ROBOT_VOICE_TTS_FALLBACK_TO_SYSTEM=true
-ROBOT_VOICE_WAKE_WORD=波西
-ROBOT_VOICE_WAKE_ALIASES="波希,波惜,Bo Xi,Bosi"
+ROBOT_VOICE_WAKE_WORD=爱莉
+ROBOT_VOICE_WAKE_ALIASES="艾莉,爱丽,艾丽,爱里,爱莉希雅,Ai Li,Aili,Ellie"
 ROBOT_VOICE_WAKE_SESSION_SECONDS=45
 ROBOT_VOICE_SLEEP_PHRASES=再见,休息吧,不用了
 ```

@@ -29,7 +29,7 @@ class FakeDeepSeekClient:
         type(self).request_json = kwargs["json"]
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": "你好，我是波西。"}}]},
+            json={"choices": [{"message": {"content": "你好，我是爱莉。"}}]},
             request=httpx.Request("POST", url),
         )
 
@@ -97,7 +97,7 @@ def test_deepseek_text_provider_uses_v4_without_thinking(
     provider = LocalDeepSeekVoiceProvider(settings)
     answer = asyncio.run(provider.answer("system rules", "你好"))
 
-    assert answer == "你好，我是波西。"
+    assert answer == "你好，我是爱莉。"
     assert FakeDeepSeekClient.request_url == "https://api.deepseek.com/chat/completions"
     assert FakeDeepSeekClient.request_json == {
         "model": "deepseek-v4-flash",
@@ -182,7 +182,7 @@ def test_local_neural_tts_uses_qwen_serena_and_bounded_tokens(
     )
 
     provider = LocalDeepSeekVoiceProvider(settings)
-    pcm = asyncio.run(provider._synthesize_neural("你好，我是波西。"))
+    pcm = asyncio.run(provider._synthesize_neural("你好，我是爱莉。"))
 
     assert pcm == b"pcm"
     assert FakeNeuralTtsClient.request_json is not None
@@ -219,7 +219,7 @@ def test_gpt_sovits_uses_trained_voice_reference(
     )
 
     provider = LocalDeepSeekVoiceProvider(settings)
-    pcm = asyncio.run(provider._synthesize_gpt_sovits("你好，我是波西。"))
+    pcm = asyncio.run(provider._synthesize_gpt_sovits("你好，我是爱莉。"))
 
     assert pcm == b"pcm"
     assert FakeGptSovitsClient.request_url == "http://127.0.0.1:9880/tts"
