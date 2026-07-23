@@ -306,7 +306,7 @@ def test_confirmed_child_identity_is_session_scoped_and_prompted(
     assert manager.state.speaker_identity == "六六"
     assert "自然合适时称呼一次“六六”" in manager._instructions()
 
-    manager._reset_inferred_speaker()
+    manager.clear_inferred_speaker()
     assert manager.state.user_id == "user-2"
     assert manager.state.speaker_identity is None
 

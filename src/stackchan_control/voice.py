@@ -724,7 +724,7 @@ class VoiceSessionManager:
         self.state.speaker_identity_at = datetime.now(timezone.utc)
         self.state.updated_at = datetime.now(timezone.utc)
 
-    def _reset_inferred_speaker(self) -> None:
+    def clear_inferred_speaker(self) -> None:
         if self.state.speaker_identity is not None:
             self._history.clear()
             self.state.user_id = self._base_user_id
@@ -763,7 +763,7 @@ class VoiceSessionManager:
             self.state.enabled = True
             self._base_user_id = target_user
             self.state.user_id = target_user
-            self._reset_inferred_speaker()
+            self.clear_inferred_speaker()
             self.state.awake = not bool(self.settings.voice_wake_word)
             self.state.last_wake_keyword = None
             self.state.wake_detected_at = None
@@ -803,7 +803,7 @@ class VoiceSessionManager:
             self._history.clear()
             self.state.awake = False
             self._wake_deadline = None
-            self._reset_inferred_speaker()
+            self.clear_inferred_speaker()
             self.state.error = None
             self._set_mode(VoiceMode.STOPPED)
         if await self.gateway.is_online():
@@ -841,7 +841,7 @@ class VoiceSessionManager:
         self.state.enabled = False
         self.state.awake = False
         self._wake_deadline = None
-        self._reset_inferred_speaker()
+        self.clear_inferred_speaker()
         self._set_mode(VoiceMode.STOPPED)
 
     async def ingest_opus(self, payload: bytes) -> None:
@@ -983,6 +983,7 @@ class VoiceSessionManager:
                         direct_answer = "我在，你说吧。"
                         wake_only_ack = True
                 if wake_reacquire_requested:
+                    self.clear_inferred_speaker()
                     evidence = self._child_voice_classifier.classify(pcm or b"")
                     self._record_child_voice_evidence(evidence)
                     self._schedule_wake_callback(evidence)
@@ -1173,7 +1174,7 @@ class VoiceSessionManager:
             self.state.awake = False
             self._wake_deadline = None
             self._history.clear()
-            self._reset_inferred_speaker()
+            self.clear_inferred_speaker()
             if self.state.mode == VoiceMode.LISTENING:
                 self._set_mode(VoiceMode.WAITING_FOR_WAKE_WORD)
 

@@ -133,6 +133,7 @@ def create_app(
     )
 
     async def handle_wake(evidence):
+        voice.clear_inferred_speaker()
         identity = await presence.reacquire_after_wake(evidence)
         if identity is not None and identity.confirmed_child:
             voice.identify_speaker(
