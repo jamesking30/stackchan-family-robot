@@ -82,11 +82,27 @@ def test_gateway_controls_connected_stackchan(gateway_client):
         }
 
         response = gateway_client.post(
+            "/v1/device/avatar",
+            headers=ADMIN_HEADERS,
+            json={"emotion": "thinking"},
+        )
+        assert response.status_code == 200
+        image_frame = unpack_frame(websocket.receive_bytes())
+        overlay_frame = unpack_frame(websocket.receive_bytes())
+        assert image_frame.message_type == MessageType.JPEG
+        assert image_frame.payload.startswith(b"\xff\xd8")
+        assert overlay_frame.message_type == MessageType.VIDEO_MODE_ON
+
+        response = gateway_client.post(
             "/v1/device/expression",
             headers=ADMIN_HEADERS,
             json={"emotion": "happy", "mouth_weight": 45},
         )
         assert response.status_code == 200
+        assert (
+            unpack_frame(websocket.receive_bytes()).message_type
+            == MessageType.VIDEO_MODE_OFF
+        )
         message_type, payload = decode_json_frame(websocket.receive_bytes())
         assert message_type == MessageType.CONTROL_AVATAR
         assert payload["leftEye"] == {"weight": 72, "rotation": 1550}
@@ -134,10 +150,12 @@ def test_codex_task_status_is_forwarded_to_robot(gateway_client):
         )
         assert response.status_code == 200
 
-        expression_type, expression = decode_json_frame(websocket.receive_bytes())
+        image_frame = unpack_frame(websocket.receive_bytes())
+        overlay_frame = unpack_frame(websocket.receive_bytes())
         text_type, text_payload = decode_json_frame(websocket.receive_bytes())
-        assert expression_type == MessageType.CONTROL_AVATAR
-        assert expression["leftEye"] == {"weight": 75, "rotation": 0}
+        assert image_frame.message_type == MessageType.JPEG
+        assert image_frame.payload.startswith(b"\xff\xd8")
+        assert overlay_frame.message_type == MessageType.VIDEO_MODE_ON
         assert text_type == MessageType.TEXT_MESSAGE
         assert text_payload["name"] == "codex"
         assert "编译产品固件" in text_payload["content"]

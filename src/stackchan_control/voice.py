@@ -21,6 +21,7 @@ from typing import AsyncIterator, Protocol
 
 import httpx
 
+from .avatar import AvatarController
 from .gateway import DeviceOfflineError, MessageType, StackChanGateway
 from .repository import RobotRepository
 from .settings import Settings
@@ -621,6 +622,7 @@ class VoiceSessionManager:
         provider: VoiceProvider | None = None,
         codec: OpusCodec | None = None,
         wake_detector: WakeWordDetector | None = None,
+        avatar_controller: AvatarController | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
@@ -628,6 +630,7 @@ class VoiceSessionManager:
         self.provider = provider
         self.codec = codec
         self.wake_detector = wake_detector
+        self.avatar_controller = avatar_controller
         self.state = VoiceState(user_id=settings.voice_user_id)
         self.state.wake_word = settings.voice_wake_word
         self._pre_roll: deque[bytes] = deque(maxlen=5)
@@ -689,6 +692,7 @@ class VoiceSessionManager:
             self._ignore_audio_until = time.monotonic() + 0.35
         try:
             await self.gateway.send(MessageType.START_AUDIO_STREAM)
+            await self._show_avatar("neutral")
         except DeviceOfflineError:
             self.state.enabled = False
             self._set_mode(VoiceMode.STOPPED)
@@ -709,6 +713,7 @@ class VoiceSessionManager:
             self._set_mode(VoiceMode.STOPPED)
         if await self.gateway.is_online():
             await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
+            await self._show_avatar("neutral")
         return self.state.snapshot()
 
     async def interrupt(self) -> dict[str, object]:
@@ -852,6 +857,7 @@ class VoiceSessionManager:
             assert self.provider is not None
             if transcript is None:
                 self._set_mode(VoiceMode.TRANSCRIBING)
+                await self._show_avatar("listening")
                 transcript = await self.provider.transcribe(self._wav(pcm or b""))
                 self._record_latency("asr", turn_started)
             original_transcript = transcript
@@ -885,6 +891,7 @@ class VoiceSessionManager:
             self.state.turn_id += 1
             self.state.transcript = transcript or original_transcript
             self._set_mode(VoiceMode.THINKING)
+            await self._show_avatar("thinking")
             instructions = self._instructions()
             answer = ""
             first_segment = True
@@ -908,6 +915,7 @@ class VoiceSessionManager:
                 speech_pcm = self._maximize_speech_pcm(speech_pcm)
                 if not microphone_paused:
                     self._set_mode(VoiceMode.SPEAKING)
+                    await self._show_avatar("happy")
                     await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
                     microphone_paused = True
                     self._clear_audio()
@@ -956,6 +964,7 @@ class VoiceSessionManager:
             self._record_latency("turn_total", turn_started)
             logger.info("voice turn latency_ms=%s", self.state.latency_ms)
             self._set_mode(self._idle_mode())
+            await self._show_avatar("listening" if self.state.awake else "neutral")
         except asyncio.CancelledError:
             self._set_mode(self._idle_mode())
             raise
@@ -976,6 +985,7 @@ class VoiceSessionManager:
                 # returning the state machine to an ingestible mode.
                 self._ignore_audio_until = time.monotonic() + 0.5
                 self._set_mode(self._idle_mode())
+                await self._show_avatar("concerned")
             else:
                 self._set_mode(VoiceMode.ERROR)
         finally:
@@ -1110,6 +1120,7 @@ class VoiceSessionManager:
         assert self.codec is not None
         cached_pcm = self._load_wake_ack_pcm()
         self._set_mode(VoiceMode.SPEAKING)
+        await self._show_avatar("listening")
         self._clear_audio()
         await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
         await self.gateway.send_json(
@@ -1127,6 +1138,15 @@ class VoiceSessionManager:
         self._ignore_audio_until = time.monotonic() + 0.35
         self._activate_wake_session()
         self._set_mode(self._idle_mode())
+
+    async def _show_avatar(self, emotion: str) -> None:
+        if self.avatar_controller is None:
+            return
+        try:
+            await self.avatar_controller.show(emotion)
+        except Exception as exc:
+            # A missing or transient display asset must never break speech.
+            logger.warning("avatar update failed for %s: %s", emotion, exc)
 
     def _clear_audio(self) -> None:
         self._pre_roll.clear()

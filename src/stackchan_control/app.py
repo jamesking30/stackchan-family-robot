@@ -19,6 +19,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 
+from .avatar import AvatarAssetError, AvatarController
 from .gateway import (
     DeviceOfflineError,
     MessageType,
@@ -35,6 +36,7 @@ from .schemas import (
     MemoryCreate,
     MemoryItem,
     PromptPreview,
+    RobotAvatarCommand,
     RobotExpressionCommand,
     RobotMotionCommand,
     RobotTextCommand,
@@ -112,6 +114,7 @@ def create_app(
         current_settings.db_path, current_settings.seed_character_dir
     )
     gateway = StackChanGateway(current_settings.device_id)
+    avatar = AvatarController(gateway, current_settings.avatar_assets_dir)
     voice = VoiceSessionManager(
         current_settings,
         repository,
@@ -119,6 +122,7 @@ def create_app(
         provider=voice_provider,
         codec=voice_codec,
         wake_detector=wake_detector,
+        avatar_controller=avatar if current_settings.avatar_voice_enabled else None,
     )
 
     app = FastAPI(
@@ -129,15 +133,20 @@ def create_app(
     app.state.settings = current_settings
     app.state.repository = repository
     app.state.gateway = gateway
+    app.state.avatar = avatar
     app.state.voice = voice
 
     async def sync_display_to_device() -> None:
         display = repository.display_state()
-        emotion = DISPLAY_EMOTIONS.get(str(display["emotion"]), "neutral")
-        await gateway.send_json(
-            MessageType.CONTROL_AVATAR,
-            expression_payload(emotion),
-        )
+        raw_emotion = str(display["emotion"])
+        try:
+            await avatar.show(raw_emotion)
+        except AvatarAssetError:
+            emotion = DISPLAY_EMOTIONS.get(raw_emotion, "neutral")
+            await gateway.send_json(
+                MessageType.CONTROL_AVATAR,
+                expression_payload(emotion),
+            )
         content = str(display["title"])
         if display["subtitle"]:
             content = f"{content}：{display['subtitle']}"
@@ -374,11 +383,21 @@ def create_app(
         return await gateway.snapshot()
 
     @app.post(
+        "/v1/device/avatar",
+        response_model=DeviceState,
+        dependencies=[Depends(require_admin)],
+    )
+    async def device_avatar(body: RobotAvatarCommand) -> dict[str, object]:
+        await avatar.show(body.emotion)
+        return await gateway.snapshot()
+
+    @app.post(
         "/v1/device/expression",
         response_model=DeviceState,
         dependencies=[Depends(require_admin)],
     )
     async def device_expression(body: RobotExpressionCommand) -> dict[str, object]:
+        await avatar.hide()
         await gateway.send_json(
             MessageType.CONTROL_AVATAR,
             expression_payload(body.emotion, body.mouth_weight),

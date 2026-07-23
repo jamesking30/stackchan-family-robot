@@ -139,6 +139,19 @@ class RobotExpressionCommand(BaseModel):
     mouth_weight: int | None = Field(default=None, ge=0, le=100)
 
 
+class RobotAvatarCommand(BaseModel):
+    emotion: Literal[
+        "neutral",
+        "listening",
+        "thinking",
+        "doubt",
+        "happy",
+        "excited",
+        "concerned",
+        "angry",
+    ]
+
+
 class RobotTextCommand(BaseModel):
     name: str = Field(default="家庭助手", min_length=1, max_length=40)
     content: str = Field(min_length=1, max_length=240)

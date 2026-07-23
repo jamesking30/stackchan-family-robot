@@ -21,6 +21,8 @@ class Settings:
     db_path: Path
     seed_character_dir: Path
     web_dir: Path
+    avatar_assets_dir: Path = PROJECT_ROOT / "assets/avatars/elysia/v1"
+    avatar_voice_enabled: bool = False
     admin_api_key: str | None = None
     device_api_key: str | None = None
     device_id: str = "stackchan-home-01"
@@ -95,6 +97,16 @@ class Settings:
             db_path=db_path,
             seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
             web_dir=PROJECT_ROOT / "web",
+            avatar_assets_dir=project_path(
+                os.getenv(
+                    "ROBOT_AVATAR_ASSETS_DIR",
+                    str(PROJECT_ROOT / "assets/avatars/elysia/v1"),
+                )
+            ),
+            avatar_voice_enabled=os.getenv(
+                "ROBOT_AVATAR_VOICE_ENABLED", "true"
+            ).lower()
+            in {"1", "true", "yes", "on"},
             admin_api_key=os.getenv("ROBOT_ADMIN_API_KEY") or None,
             device_api_key=os.getenv("ROBOT_DEVICE_API_KEY") or None,
             device_id=os.getenv("STACKCHAN_DEVICE_ID", "stackchan-home-01"),
