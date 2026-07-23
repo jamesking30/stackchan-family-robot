@@ -408,24 +408,29 @@ class LocalDeepSeekVoiceProvider:
         for match in boundary.finditer(buffer):
             end = match.end()
             segment = buffer[start:end].strip()
-            is_soft_pause = match.group(0).strip() in {"，", ","}
-            if is_soft_pause:
-                chinese_chars = len(
-                    re.findall(r"[\u3400-\u9fff]", segment)
-                )
-                latin_words = len(
-                    re.findall(r"[A-Za-z0-9]+", segment)
-                )
-                if (
-                    chinese_chars < 12
-                    and latin_words < 8
-                    and len(segment) < 24
-                ):
-                    continue
+            # Avoid a separate GPT-SoVITS model pass for every short clause.
+            # A longer first batch gives generation of the following batch time
+            # to finish while the robot is already speaking.
+            chinese_chars = len(re.findall(r"[\u3400-\u9fff]", segment))
+            latin_words = len(re.findall(r"[A-Za-z0-9]+", segment))
+            if (
+                chinese_chars < 28
+                and latin_words < 12
+                and len(segment) < 48
+            ):
+                continue
             if segment:
                 segments.append(segment)
             start = end
         return segments, buffer[start:]
+
+    @staticmethod
+    def _gpt_sovits_text_lang(text: str) -> str:
+        has_chinese = bool(re.search(r"[\u3400-\u9fff]", text))
+        # GPT-SoVITS 2.0 "auto" can misclassify mixed English followed by
+        # Chinese punctuation as Japanese and then attempt a runtime dictionary
+        # download. Its Chinese frontend already preserves embedded English.
+        return "zh" if has_chinese else "en"
 
     async def synthesize(self, text: str) -> bytes:
         if self.tts_provider == "gpt_sovits" and self.gpt_sovits_base_url:
@@ -486,7 +491,7 @@ class LocalDeepSeekVoiceProvider:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        text_lang = "zh" if re.search(r"[\u3400-\u9fff]", text) else "en"
+        text_lang = self._gpt_sovits_text_lang(text)
         payload = {
             "text": text,
             "text_lang": text_lang,
@@ -567,7 +572,7 @@ class LocalDeepSeekVoiceProvider:
             raise VoiceError(
                 f"GPT-SoVITS reference audio was not found: {self.gpt_sovits_ref_audio}"
             )
-        text_lang = "zh" if re.search(r"[\u3400-\u9fff]", text) else "en"
+        text_lang = self._gpt_sovits_text_lang(text)
         async with httpx.AsyncClient(timeout=180) as client:
             response = await client.post(
                 f"{self.gpt_sovits_base_url}/tts",
@@ -698,6 +703,9 @@ class OpusCodec:
     SPEECH_SAMPLE_RATE = 24000
     SPEECH_FRAME_DURATION_MS = 20
     SPEECH_BITRATE = 48000
+    # Keep enough decoded audio on the robot to bridge GPT-SoVITS sentence
+    # generation gaps without adding that delay to the first audible frame.
+    PLAYBACK_PREFETCH_FRAMES = 56
 
     def __init__(self) -> None:
         self._lib = self._load_library()
@@ -1426,7 +1434,7 @@ class VoiceSessionManager:
             first_audio_packet = True
             first_audio_chunk = True
             audio_next_send: float | None = None
-            audio_burst_remaining = 6
+            audio_burst_remaining = OpusCodec.PLAYBACK_PREFETCH_FRAMES
             last_mouth_level: int | None = None
             last_mouth_update = 0.0
             last_packet_sent_at: float | None = None
@@ -1499,7 +1507,9 @@ class VoiceSessionManager:
                         ):
                             # Build a small device-side jitter buffer after TTS
                             # startup or a segment-generation gap.
-                            audio_burst_remaining = 6
+                            audio_burst_remaining = (
+                                OpusCodec.PLAYBACK_PREFETCH_FRAMES
+                            )
                             audio_next_send = now
                             self.state.playback_rebuffers += 1
                         if audio_burst_remaining <= 0:
@@ -1553,9 +1563,19 @@ class VoiceSessionManager:
                     await speech_producer
                 except asyncio.CancelledError:
                     pass
-            # The host intentionally stays about 120 ms ahead of playback.
-            # Let the device drain that buffer before changing the large JPEG.
-            await asyncio.sleep(0.12)
+            # The burst sender may finish before the speaker drains its queue.
+            # Keep the microphone paused and the speaking avatar visible until
+            # the worst-case prefetched tail has played.
+            await asyncio.sleep(
+                max(
+                    0.12,
+                    (
+                        OpusCodec.PLAYBACK_PREFETCH_FRAMES - 4
+                    )
+                    * OpusCodec.SPEECH_FRAME_DURATION_MS
+                    / 1000,
+                )
+            )
             await self._show_speaking_frame(0)
             if not answer:
                 raise VoiceError("DeepSeek returned no spoken text")
@@ -1679,6 +1699,13 @@ class VoiceSessionManager:
     ) -> None:
         """Generate later speech segments while the device plays the current one."""
         first_segment = True
+        frame_bytes = (
+            OpusCodec.SPEECH_SAMPLE_RATE
+            * OpusCodec.SPEECH_FRAME_DURATION_MS
+            // 1000
+            * 2
+        )
+        pending_pcm = b""
         try:
             async for raw_segment in self._response_segments(
                 instructions, transcript, direct_answer
@@ -1694,14 +1721,36 @@ class VoiceSessionManager:
                 )
                 async for speech_pcm in self._speech_chunks(segment, cached_pcm):
                     if speech_pcm:
-                        await queue.put(
-                            ("audio", self._maximize_speech_pcm(speech_pcm))
+                        ready_pcm, pending_pcm = self._split_complete_pcm_frames(
+                            pending_pcm, speech_pcm, frame_bytes
                         )
+                        if ready_pcm:
+                            await queue.put(
+                                ("audio", self._maximize_speech_pcm(ready_pcm))
+                            )
                 first_segment = False
+            # Pad at most once, at the end of the whole answer. Previously each
+            # arbitrary ffmpeg read was padded by Opus independently, inserting
+            # tiny silences throughout otherwise continuous speech.
+            if pending_pcm:
+                await queue.put(
+                    ("audio", self._maximize_speech_pcm(pending_pcm))
+                )
         except Exception as exc:
             await queue.put(("error", exc))
         finally:
             await queue.put(("done", None))
+
+    @staticmethod
+    def _split_complete_pcm_frames(
+        pending: bytes, chunk: bytes, frame_bytes: int
+    ) -> tuple[bytes, bytes]:
+        """Return complete codec frames and retain one incomplete trailing frame."""
+        if frame_bytes <= 0:
+            raise ValueError("frame_bytes must be positive")
+        combined = pending + chunk
+        complete_bytes = len(combined) // frame_bytes * frame_bytes
+        return combined[:complete_bytes], combined[complete_bytes:]
 
     @staticmethod
     def _clean_spoken_answer(text: str) -> str:

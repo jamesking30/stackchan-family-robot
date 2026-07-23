@@ -263,22 +263,22 @@ def test_deepseek_messages_include_bounded_conversation_history():
     assert messages[-1]["content"] == "那第二个呢？"
 
 
-def test_streaming_answer_is_split_on_natural_sentence_boundaries():
+def test_streaming_answer_coalesces_short_sentences_for_continuous_tts():
     segments, tail = LocalDeepSeekVoiceProvider._pop_spoken_segments(
         "我们先画一只猫。然后给它加上帽子！还有一点"
     )
 
-    assert segments == ["我们先画一只猫。", "然后给它加上帽子！"]
-    assert tail == "还有一点"
+    assert segments == []
+    assert tail == "我们先画一只猫。然后给它加上帽子！还有一点"
 
 
-def test_streaming_answer_uses_long_comma_clause_for_faster_first_audio():
+def test_streaming_answer_coalesces_comma_clauses_to_avoid_tts_gaps():
     segments, tail = LocalDeepSeekVoiceProvider._pop_spoken_segments(
         "让我先看看你刚刚提到的那个问题，然后我们一起决定。"
     )
 
-    assert segments == ["让我先看看你刚刚提到的那个问题，", "然后我们一起决定。"]
-    assert tail == ""
+    assert segments == []
+    assert tail == "让我先看看你刚刚提到的那个问题，然后我们一起决定。"
 
 
 def test_local_neural_tts_uses_qwen_serena_and_bounded_tokens(

@@ -9,7 +9,12 @@ from stackchan_control.app import create_app
 from stackchan_control.gateway import MessageType, pack_frame, unpack_frame
 from stackchan_control.repository import RobotRepository
 from stackchan_control.settings import PROJECT_ROOT, Settings
-from stackchan_control.voice import OpusCodec, VoiceMode, VoiceSessionManager
+from stackchan_control.voice import (
+    LocalDeepSeekVoiceProvider,
+    OpusCodec,
+    VoiceMode,
+    VoiceSessionManager,
+)
 
 
 ADMIN_HEADERS = {"X-Robot-Admin-Key": "admin-secret"}
@@ -133,6 +138,11 @@ def test_bilingual_voice_turn_stays_in_memory_and_reaches_robot(tmp_path: Path):
             text_frame = unpack_frame(websocket.receive_bytes())
             audio_frame = unpack_frame(websocket.receive_bytes())
             microphone_resume = unpack_frame(websocket.receive_bytes())
+            while (
+                microphone_resume.message_type
+                != MessageType.START_AUDIO_STREAM
+            ):
+                microphone_resume = unpack_frame(websocket.receive_bytes())
             assert microphone_pause.message_type == MessageType.STOP_AUDIO_STREAM
             assert text_frame.message_type == MessageType.TEXT_MESSAGE
             assert audio_frame.message_type == MessageType.OPUS
@@ -490,3 +500,36 @@ def test_opus_speech_uses_twenty_millisecond_frames():
 
     assert len(packets) == 5
     assert all(packets)
+
+
+def test_streamed_pcm_retains_partial_frame_without_inserting_silence():
+    frame_bytes = 960
+    source = bytes(index % 251 for index in range(frame_bytes * 3 + 137))
+    pending = b""
+    output = b""
+
+    for start, end in ((0, 317), (317, 1901), (1901, len(source))):
+        ready, pending = VoiceSessionManager._split_complete_pcm_frames(
+            pending, source[start:end], frame_bytes
+        )
+        assert len(ready) % frame_bytes == 0
+        output += ready
+
+    assert output + pending == source
+    assert len(output) == frame_bytes * 3
+    assert len(pending) == 137
+
+
+def test_spoken_segments_coalesce_short_sentences_for_tts_prefetch():
+    text = "早上好呀。今天风很轻。我们先看看计划，再一起出发吧！"
+
+    segments, tail = LocalDeepSeekVoiceProvider._pop_spoken_segments(text)
+
+    assert segments == []
+    assert tail == text
+
+
+def test_gpt_sovits_uses_chinese_frontend_for_mixed_text():
+    assert LocalDeepSeekVoiceProvider._gpt_sovits_text_lang("你好，hello") == "zh"
+    assert LocalDeepSeekVoiceProvider._gpt_sovits_text_lang("你好呀") == "zh"
+    assert LocalDeepSeekVoiceProvider._gpt_sovits_text_lang("hello") == "en"

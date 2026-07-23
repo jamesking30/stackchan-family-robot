@@ -93,7 +93,7 @@ index 0fc43ec..2571567 100644
 +                        packet->sample_rate    = 24000;
 +                        packet->frame_duration = 20;
 +                        packet->payload.assign(msg.data.begin() + 5, msg.data.end());
-+                        if (!_audio_service.PushPacketToDecodeQueue(std::move(packet))) {
++                        if (!_audio_service.PushPacketToDecodeQueue(std::move(packet), true)) {
 +                            ESP_LOGW(_tag.c_str(), "Audio playback queue full, dropping frame");
 +                        }
 +                    }
@@ -168,3 +168,30 @@ diff --git a/firmware/main/apps/app_avatar/app_avatar.cpp b/firmware/main/apps/a
 @@ -284,2 +285 @@ void AppAvatar::onClose()
 -        view::destroy_home_indicator();
          view::destroy_status_bar();
+
+diff --git a/firmware/xiaozhi-esp32/main/audio/audio_service.h b/firmware/xiaozhi-esp32/main/audio/audio_service.h
+index 54ac9d1..d3dc477 100644
+--- a/firmware/xiaozhi-esp32/main/audio/audio_service.h
++++ b/firmware/xiaozhi-esp32/main/audio/audio_service.h
+@@ -35 +35,2 @@
+-#define MAX_PLAYBACK_TASKS_IN_QUEUE 2
++#define MAX_PLAYBACK_TASKS_IN_QUEUE 24
++#define MIN_PLAYBACK_TASKS_TO_START 4
+@@ -151,0 +153 @@ private:
++    bool playback_primed_ = false;
+
+diff --git a/firmware/xiaozhi-esp32/main/audio/audio_service.cc b/firmware/xiaozhi-esp32/main/audio/audio_service.cc
+index 50bf213..080454f 100644
+--- a/firmware/xiaozhi-esp32/main/audio/audio_service.cc
++++ b/firmware/xiaozhi-esp32/main/audio/audio_service.cc
+@@ -293 +293,5 @@ void AudioService::AudioOutputTask() {
+-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
++        audio_queue_cv_.wait(lock, [this]() {
++            return service_stopped_ ||
++                (audio_playback_queue_.size() >= MIN_PLAYBACK_TASKS_TO_START) ||
++                (playback_primed_ && !audio_playback_queue_.empty());
++        });
+@@ -297,0 +302 @@ void AudioService::AudioOutputTask() {
++        playback_primed_ = true;
+@@ -676,0 +682 @@ void AudioService::ResetDecoder() {
++    playback_primed_ = false;
