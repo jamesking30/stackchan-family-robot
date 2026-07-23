@@ -249,7 +249,7 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
             microphone_resume = unpack_frame(websocket.receive_bytes())
             assert microphone_pause.message_type == MessageType.STOP_AUDIO_STREAM
             assert feedback.message_type == MessageType.TEXT_MESSAGE
-            assert json.loads(feedback.payload)["content"] == "我在，你说吧。"
+            assert json.loads(feedback.payload)["content"] == "嗯哼。"
             assert audio.message_type == MessageType.OPUS
             assert audio.payload == b"speaker-opus"
             assert microphone_resume.message_type == MessageType.START_AUDIO_STREAM
@@ -488,6 +488,28 @@ def test_cached_wake_ack_rejects_wrong_sample_rate(tmp_path: Path):
     manager = VoiceSessionManager(settings, None, None)  # type: ignore[arg-type]
 
     assert manager._load_wake_ack_pcm() is None
+
+
+def test_wake_acknowledgements_rotate_without_immediate_repetition(tmp_path: Path):
+    ack_path = tmp_path / "wake-ack-v3.wav"
+    write_pcm_wav(ack_path, b"\x01\x00" * 320)
+    variants = tmp_path / "wake-acks-v1"
+    variants.mkdir()
+    write_pcm_wav(variants / "wo-zai-ya.wav", b"\x02\x00" * 320)
+    settings = Settings(
+        db_path=tmp_path / "wake-cache.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        voice_wake_ack_pcm=ack_path,
+    )
+    manager = VoiceSessionManager(settings, None, None)  # type: ignore[arg-type]
+
+    first_text, first_pcm = manager._select_wake_ack()
+    second_text, second_pcm = manager._select_wake_ack()
+
+    assert {first_text, second_text} == {"嗯哼。", "我在呀。"}
+    assert first_pcm
+    assert second_pcm
 
 
 def test_opus_speech_uses_twenty_millisecond_frames():

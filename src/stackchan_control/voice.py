@@ -34,6 +34,14 @@ from .wake import SherpaWakeWordDetector, WakeWordDetector
 
 logger = logging.getLogger(__name__)
 
+WAKE_ACK_VARIANTS = (
+    ("嗯哼。", None),
+    ("我在呀。", "wo-zai-ya"),
+    ("来啦。", "lai-la"),
+    ("怎么啦？", "zen-me-la"),
+    ("嗨，我在。", "hai-wo-zai"),
+)
+
 
 class VoiceError(RuntimeError):
     pass
@@ -959,6 +967,8 @@ class VoiceSessionManager:
         self._history: deque[dict[str, str]] = deque(maxlen=12)
         self._task: asyncio.Task[None] | None = None
         self._idle_animation_task: asyncio.Task[None] | None = None
+        self._wake_ack_choices: list[tuple[str, bytes]] | None = None
+        self._last_wake_ack_text: str | None = None
         self._wake_callback: (
             Callable[[ChildVoiceEvidence], Awaitable[None]] | None
         ) = None
@@ -1367,6 +1377,7 @@ class VoiceSessionManager:
         microphone_paused = False
         sleep_after_reply = False
         wake_only_ack = False
+        wake_ack_pcm: bytes | None = None
         turn_started = time.perf_counter()
         self.state.latency_ms = {}
         self.state.playback_packets = 0
@@ -1407,12 +1418,12 @@ class VoiceSessionManager:
                     self._activate_wake_session()
                     transcript = wake_command
                     if not transcript:
-                        direct_answer = "我在，你说吧。"
+                        direct_answer, wake_ack_pcm = self._select_wake_ack()
                         wake_only_ack = True
                 elif wake_command is not None:
                     transcript = wake_command
                     if not transcript:
-                        direct_answer = "我在，你说吧。"
+                        direct_answer, wake_ack_pcm = self._select_wake_ack()
                         wake_only_ack = True
                 if wake_reacquire_requested:
                     self.clear_inferred_speaker()
@@ -1446,6 +1457,7 @@ class VoiceSessionManager:
                     transcript,
                     direct_answer,
                     wake_only_ack=wake_only_ack,
+                    wake_ack_pcm=wake_ack_pcm,
                 )
             )
             try:
@@ -1696,6 +1708,7 @@ class VoiceSessionManager:
         direct_answer: str | None,
         *,
         wake_only_ack: bool,
+        wake_ack_pcm: bytes | None,
     ) -> None:
         """Generate later speech segments while the device plays the current one."""
         first_segment = True
@@ -1715,7 +1728,7 @@ class VoiceSessionManager:
                     continue
                 await queue.put(("segment", segment))
                 cached_pcm = (
-                    self._load_wake_ack_pcm()
+                    wake_ack_pcm
                     if wake_only_ack and first_segment
                     else None
                 )
@@ -1883,6 +1896,12 @@ class VoiceSessionManager:
         )
         current_task = asyncio.current_task()
         try:
+            if await self.gateway.is_online():
+                assert self.avatar_controller is not None
+                # Reassert video mode immediately when a wake session expires
+                # or the device reconnects. Otherwise the firmware's built-in
+                # face can remain visible until the first random gesture.
+                await self.avatar_controller.show("neutral")
             while (
                 self.state.enabled
                 and self.state.mode == VoiceMode.WAITING_FOR_WAKE_WORD
@@ -1896,6 +1915,8 @@ class VoiceSessionManager:
                 if not await self.gateway.is_online():
                     continue
                 assert self.avatar_controller is not None
+                if self.avatar_controller.current_emotion != "neutral":
+                    await self.avatar_controller.show("neutral")
                 gesture = random.choices(gestures, weights=weights, k=1)[0]
                 await self.avatar_controller.play_idle_gesture(gesture)
         except asyncio.CancelledError:
@@ -1918,7 +1939,10 @@ class VoiceSessionManager:
             await asyncio.sleep(min(max_wait_seconds, remaining))
 
     def _load_wake_ack_pcm(self) -> bytes | None:
-        path = self.settings.voice_wake_ack_pcm
+        return self._load_wake_ack_path(self.settings.voice_wake_ack_pcm)
+
+    @staticmethod
+    def _load_wake_ack_path(path: Path) -> bytes | None:
         if not path.is_file():
             return None
         try:
@@ -1939,6 +1963,37 @@ class VoiceSessionManager:
             return None
         return pcm or None
 
+    def _available_wake_acks(self) -> list[tuple[str, bytes]]:
+        if self._wake_ack_choices is not None:
+            return self._wake_ack_choices
+        choices: list[tuple[str, bytes]] = []
+        base_pcm = self._load_wake_ack_pcm()
+        if base_pcm:
+            choices.append((WAKE_ACK_VARIANTS[0][0], base_pcm))
+        variants_dir = self.settings.voice_wake_ack_pcm.parent / "wake-acks-v1"
+        for text, slug in WAKE_ACK_VARIANTS[1:]:
+            assert slug is not None
+            pcm = self._load_wake_ack_path(variants_dir / f"{slug}.wav")
+            if pcm:
+                choices.append((text, pcm))
+        self._wake_ack_choices = choices
+        return choices
+
+    def _select_wake_ack(self) -> tuple[str, bytes | None]:
+        choices = self._available_wake_acks()
+        if not choices:
+            text, _ = random.choice(WAKE_ACK_VARIANTS)
+            self._last_wake_ack_text = text
+            logger.info("wake acknowledgement selected=%s cache=miss", text)
+            return text, None
+        candidates = [
+            choice for choice in choices if choice[0] != self._last_wake_ack_text
+        ] or choices
+        selected = random.choice(candidates)
+        self._last_wake_ack_text = selected[0]
+        logger.info("wake acknowledgement selected=%s cache=hit", selected[0])
+        return selected
+
     async def _acknowledge_wake_word(
         self,
         evidence: ChildVoiceEvidence,
@@ -1947,7 +2002,7 @@ class VoiceSessionManager:
     ) -> None:
         """Give immediate audible feedback, then start a fresh command capture."""
         assert self.codec is not None
-        cached_pcm = self._load_wake_ack_pcm()
+        ack_text, cached_pcm = self._select_wake_ack()
         self._set_mode(VoiceMode.SPEAKING)
         self._clear_audio()
         await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
@@ -1958,7 +2013,7 @@ class VoiceSessionManager:
         wake_task = self._schedule_wake_callback(evidence)
         await self.gateway.send_json(
             MessageType.TEXT_MESSAGE,
-            {"name": "爱莉", "content": "我在，你说吧。"},
+            {"name": "爱莉", "content": ack_text},
         )
         if cached_pcm:
             packets = self.codec.encode_speech(cached_pcm)
