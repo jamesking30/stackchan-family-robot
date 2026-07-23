@@ -59,6 +59,14 @@ class Settings:
     presence_target_switch_ratio: float = 1.25
     presence_target_lost_seconds: float = 30.0
     presence_manual_override_seconds: float = 60.0
+    child_identity_enabled: bool = False
+    child_identity_user_id: str = "user-4"
+    child_identity_display_name: str = "六六"
+    child_identity_age_model: Path = (
+        PROJECT_ROOT / "var/models/insightface/genderage.onnx"
+    )
+    child_identity_maximum_age: int = 11
+    child_identity_minimum_pitch_hz: float = 260.0
     admin_api_key: str | None = None
     device_api_key: str | None = None
     device_id: str = "stackchan-home-01"
@@ -241,6 +249,28 @@ class Settings:
             ),
             presence_manual_override_seconds=float(
                 os.getenv("ROBOT_PRESENCE_MANUAL_OVERRIDE_SECONDS", "60")
+            ),
+            child_identity_enabled=os.getenv(
+                "ROBOT_CHILD_IDENTITY_ENABLED", "false"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            child_identity_user_id=os.getenv(
+                "ROBOT_CHILD_IDENTITY_USER_ID", "user-4"
+            ),
+            child_identity_display_name=os.getenv(
+                "ROBOT_CHILD_IDENTITY_DISPLAY_NAME", "六六"
+            ),
+            child_identity_age_model=project_path(
+                os.getenv(
+                    "ROBOT_CHILD_IDENTITY_AGE_MODEL",
+                    "var/models/insightface/genderage.onnx",
+                )
+            ),
+            child_identity_maximum_age=int(
+                os.getenv("ROBOT_CHILD_IDENTITY_MAXIMUM_AGE", "11")
+            ),
+            child_identity_minimum_pitch_hz=float(
+                os.getenv("ROBOT_CHILD_IDENTITY_MINIMUM_PITCH_HZ", "260")
             ),
             admin_api_key=os.getenv("ROBOT_ADMIN_API_KEY") or None,
             device_api_key=os.getenv("ROBOT_DEVICE_API_KEY") or None,

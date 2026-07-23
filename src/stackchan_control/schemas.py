@@ -144,6 +144,9 @@ class PresenceStateResponse(BaseModel):
     last_scan_at: datetime | None = None
     last_wake_reacquire_at: datetime | None = None
     last_wake_reacquire_found: bool | None = None
+    last_child_face: bool | None = None
+    last_estimated_age: int | None = None
+    last_child_identity_confidence: float | None = None
     target_seen_at: datetime | None = None
     manual_override_seconds: float
     camera_frames_persisted: bool
@@ -204,7 +207,14 @@ class VoiceStateResponse(BaseModel):
     awake: bool = False
     last_wake_keyword: str | None = None
     wake_detected_at: datetime | None = None
+    last_wake_child_voice: bool | None = None
+    last_wake_pitch_hz: float | None = None
+    last_wake_voiced_ratio: float | None = None
     last_heard_transcript: str | None = None
+    speaker_identity: str | None = None
+    speaker_identity_confidence: float | None = None
+    speaker_identity_reason: str | None = None
+    speaker_identity_at: datetime | None = None
     transcript: str | None = None
     response_text: str | None = None
     error: str | None = None

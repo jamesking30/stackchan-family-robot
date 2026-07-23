@@ -2,6 +2,10 @@ import asyncio
 from pathlib import Path
 
 from stackchan_control.gateway import MessageType
+from stackchan_control.child_identity import (
+    ChildFaceEvidence,
+    ChildVoiceEvidence,
+)
 from stackchan_control.presence import FaceDetection, PresenceTracker
 from stackchan_control.settings import PROJECT_ROOT, Settings
 
@@ -33,6 +37,19 @@ class SequenceDetector:
     def detect(self, jpeg):
         assert jpeg == b"camera-frame"
         return next(self.results)
+
+
+class FakeChildAgeClassifier:
+    def __init__(self, age: int):
+        self.age = age
+
+    def classify(self, jpeg, **kwargs):
+        assert jpeg == b"camera-frame"
+        return ChildFaceEvidence(
+            is_child=self.age <= 11,
+            score=0.9,
+            estimated_age=self.age,
+        )
 
 
 def settings(tmp_path: Path, **overrides) -> Settings:
@@ -257,3 +274,43 @@ def test_wake_reacquire_schedules_full_scan_when_current_view_is_empty(
     assert tracker.mode == "wake_no_target"
     assert tracker.last_wake_reacquire_found is False
     assert tracker._next_full_scan == 0.0
+
+
+def test_wake_reacquire_confirms_child_only_with_both_modalities(
+    tmp_path: Path,
+):
+    face = FaceDetection(0.5, 0.45, 0.35, 0.35, 0.9)
+    tracker = PresenceTracker(
+        settings(tmp_path, child_identity_enabled=True),
+        FakeGateway(),  # type: ignore[arg-type]
+        voice_mode=lambda: "listening",
+        detector=SequenceDetector([[face]]),
+        age_classifier=FakeChildAgeClassifier(7),
+    )
+    voice = ChildVoiceEvidence(True, 0.85, 310.0, 0.6, 900)
+
+    identity = asyncio.run(tracker.reacquire_after_wake(voice))
+
+    assert identity is not None
+    assert identity.confirmed_child is True
+    assert identity.confidence == 0.85
+    assert tracker.snapshot()["last_estimated_age"] == 7
+
+
+def test_wake_reacquire_rejects_adult_voice_even_with_child_face(
+    tmp_path: Path,
+):
+    face = FaceDetection(0.5, 0.45, 0.35, 0.35, 0.9)
+    tracker = PresenceTracker(
+        settings(tmp_path, child_identity_enabled=True),
+        FakeGateway(),  # type: ignore[arg-type]
+        voice_mode=lambda: "listening",
+        detector=SequenceDetector([[face]]),
+        age_classifier=FakeChildAgeClassifier(7),
+    )
+    voice = ChildVoiceEvidence(False, 0.2, 170.0, 0.6, 900)
+
+    identity = asyncio.run(tracker.reacquire_after_wake(voice))
+
+    assert identity is not None
+    assert identity.confirmed_child is False

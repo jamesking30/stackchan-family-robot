@@ -146,7 +146,7 @@ class RobotRepository:
             ("user-1", "家庭成员 1", "adult", "zh-CN", 1),
             ("user-2", "家庭成员 2", "unassigned", "zh-CN", 0),
             ("user-3", "家庭成员 3", "unassigned", "zh-CN", 0),
-            ("user-4", "家庭成员 4", "unassigned", "zh-CN", 0),
+            ("user-4", "六六", "child", "zh-CN", 0),
         ]
         db.executemany(
             """

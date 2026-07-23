@@ -23,10 +23,26 @@ StackChan 使用 CoreS3 的 GC0308 摄像头进行本地人员定位。摄像头
 当前安全范围仍为 yaw `-45°–45°`、pitch `0°–45°`。因此“最近人员”
 指摄像头和扫描范围内距离最近且脸部可见的人。摄像头帧只在内存中处理。
 
+## “六六”双重识别
+
+开启后，唤醒词触发时会并行取得两项本地证据：
+
+- 从最近约 1.4 秒唤醒音频估计基频和有效浊音比例；
+- 对当前画面中距离最近的人脸运行一次年龄估计。
+
+只有“幼儿声线”和“最近人脸为幼童”同时达到阈值，当前唤醒会话才临时
+切换为 `user-4 / 六六`。任一证据不足、模型缺失或画面无人时都保持未指定
+用户。身份推断随休眠清除，不写入长期记忆；相机帧和唤醒音频均不落盘。
+
+年龄估计使用 InsightFace `buffalo_l` 模型包中的 `genderage.onnx`。
+该模型包标注为非商业研究用途；如果项目转为商业产品，需要替换为授权
+兼容的模型或自行训练。
+
 ## 安装模型
 
 ```bash
 ./scripts/setup_presence_tracking.sh
+./scripts/setup_child_identity.sh
 ```
 
 脚本下载官方 MediaPipe BlazeFace short-range 模型并校验 SHA-256。
@@ -47,3 +63,7 @@ robotctl presence scan
 - `ROBOT_PRESENCE_SERVO_SPEED`
 - `ROBOT_PRESENCE_YAW_DIRECTION`
 - `ROBOT_PRESENCE_TARGET_SWITCH_RATIO`
+- `ROBOT_CHILD_IDENTITY_ENABLED`
+- `ROBOT_CHILD_IDENTITY_USER_ID`
+- `ROBOT_CHILD_IDENTITY_MAXIMUM_AGE`
+- `ROBOT_CHILD_IDENTITY_MINIMUM_PITCH_HZ`

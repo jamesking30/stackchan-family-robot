@@ -5,5 +5,7 @@ def test_health_reports_voice_configuration_consistently(client):
     assert health["voice_configured"] is False
     assert health["voice_ready"] is False
     assert health["wake_word_ready"] is False
+    assert health["child_identity_enabled"] is False
+    assert health["child_identity_ready"] is True
     assert health["deployment_path_valid"] is True
     assert health["missing_paths"] == []

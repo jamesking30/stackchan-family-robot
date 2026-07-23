@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from stackchan_control.app import create_app
 from stackchan_control.gateway import MessageType, pack_frame, unpack_frame
+from stackchan_control.repository import RobotRepository
 from stackchan_control.settings import PROJECT_ROOT, Settings
 from stackchan_control.voice import OpusCodec, VoiceSessionManager
 
@@ -214,8 +215,10 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
     ) as client:
         wake_callbacks: list[str] = []
 
-        async def on_wake():
-            wake_callbacks.append("called")
+        async def on_wake(evidence):
+            wake_callbacks.append(
+                "child" if evidence.is_child else "not-child"
+            )
 
         client.app.state.voice.set_wake_callback(on_wake)
         with client.websocket_connect(WS_PATH, headers=DEVICE_HEADERS) as websocket:
@@ -247,7 +250,7 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
             deadline = time.monotonic() + 1
             while time.monotonic() < deadline and not wake_callbacks:
                 time.sleep(0.01)
-            assert wake_callbacks == ["called"]
+            assert wake_callbacks == ["not-child"]
 
             client.post("/v1/voice/stop", headers=ADMIN_HEADERS)
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.STOP_AUDIO_STREAM
@@ -276,6 +279,36 @@ def test_spoken_answer_removes_markup_urls_and_emoji():
     )
 
     assert cleaned == "好的 详见"
+
+
+def test_confirmed_child_identity_is_session_scoped_and_prompted(
+    tmp_path: Path,
+):
+    settings = Settings(
+        db_path=tmp_path / "identity.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+    )
+    repository = RobotRepository(
+        settings.db_path, settings.seed_character_dir
+    )
+    manager = VoiceSessionManager(
+        settings, repository, None  # type: ignore[arg-type]
+    )
+
+    manager.identify_speaker(
+        "user-4",
+        confidence=0.82,
+        reason="child_voice_and_nearest_child_face",
+    )
+
+    assert manager.state.user_id == "user-4"
+    assert manager.state.speaker_identity == "六六"
+    assert "自然合适时称呼一次“六六”" in manager._instructions()
+
+    manager._reset_inferred_speaker()
+    assert manager.state.user_id == "user-2"
+    assert manager.state.speaker_identity is None
 
 
 def test_voice_requires_online_device_and_admin_key(tmp_path: Path):

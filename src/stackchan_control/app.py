@@ -131,7 +131,17 @@ def create_app(
         gateway,
         voice_mode=lambda: voice.state.mode.value,
     )
-    voice.set_wake_callback(presence.reacquire_after_wake)
+
+    async def handle_wake(evidence):
+        identity = await presence.reacquire_after_wake(evidence)
+        if identity is not None and identity.confirmed_child:
+            voice.identify_speaker(
+                current_settings.child_identity_user_id,
+                confidence=identity.confidence,
+                reason="child_voice_and_nearest_child_face",
+            )
+
+    voice.set_wake_callback(handle_wake)
 
     app = FastAPI(
         title="StackChan Family Robot Control API",
@@ -234,6 +244,10 @@ def create_app(
             required_paths["presence_face_model"] = (
                 current_settings.presence_face_model
             )
+        if current_settings.child_identity_enabled:
+            required_paths["child_identity_age_model"] = (
+                current_settings.child_identity_age_model
+            )
         missing_paths = [
             name for name, path in required_paths.items() if not path.exists()
         ]
@@ -264,6 +278,11 @@ def create_app(
             "presence_ready": (
                 not current_settings.presence_enabled
                 or presence.mode != "error"
+            ),
+            "child_identity_enabled": current_settings.child_identity_enabled,
+            "child_identity_ready": (
+                not current_settings.child_identity_enabled
+                or current_settings.child_identity_age_model.is_file()
             ),
         }
 

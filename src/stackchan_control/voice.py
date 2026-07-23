@@ -23,6 +23,7 @@ from typing import AsyncIterator, Awaitable, Callable, Protocol
 import httpx
 
 from .avatar import AvatarController
+from .child_identity import ChildVoiceClassifier, ChildVoiceEvidence
 from .gateway import DeviceOfflineError, MessageType, StackChanGateway
 from .repository import RobotRepository
 from .settings import Settings
@@ -605,7 +606,14 @@ class VoiceState:
     awake: bool = False
     last_wake_keyword: str | None = None
     wake_detected_at: datetime | None = None
+    last_wake_child_voice: bool | None = None
+    last_wake_pitch_hz: float | None = None
+    last_wake_voiced_ratio: float | None = None
     last_heard_transcript: str | None = None
+    speaker_identity: str | None = None
+    speaker_identity_confidence: float | None = None
+    speaker_identity_reason: str | None = None
+    speaker_identity_at: datetime | None = None
     transcript: str | None = None
     response_text: str | None = None
     error: str | None = None
@@ -624,7 +632,14 @@ class VoiceState:
             "awake": self.awake,
             "last_wake_keyword": self.last_wake_keyword,
             "wake_detected_at": self.wake_detected_at,
+            "last_wake_child_voice": self.last_wake_child_voice,
+            "last_wake_pitch_hz": self.last_wake_pitch_hz,
+            "last_wake_voiced_ratio": self.last_wake_voiced_ratio,
             "last_heard_transcript": self.last_heard_transcript,
+            "speaker_identity": self.speaker_identity,
+            "speaker_identity_confidence": self.speaker_identity_confidence,
+            "speaker_identity_reason": self.speaker_identity_reason,
+            "speaker_identity_at": self.speaker_identity_at,
             "transcript": self.transcript,
             "response_text": self.response_text,
             "error": self.error,
@@ -658,6 +673,7 @@ class VoiceSessionManager:
         self.state = VoiceState(user_id=settings.voice_user_id)
         self.state.wake_word = settings.voice_wake_word
         self._pre_roll: deque[bytes] = deque(maxlen=5)
+        self._wake_audio: deque[bytes] = deque(maxlen=24)
         self._utterance: list[bytes] = []
         self._speaking_detected = False
         self._silence_ms = 0
@@ -667,24 +683,55 @@ class VoiceSessionManager:
         self._history: deque[dict[str, str]] = deque(maxlen=12)
         self._task: asyncio.Task[None] | None = None
         self._idle_animation_task: asyncio.Task[None] | None = None
-        self._wake_callback: Callable[[], Awaitable[None]] | None = None
+        self._wake_callback: (
+            Callable[[ChildVoiceEvidence], Awaitable[None]] | None
+        ) = None
+        self._child_voice_classifier = ChildVoiceClassifier(
+            minimum_pitch_hz=settings.child_identity_minimum_pitch_hz
+        )
+        self._base_user_id = settings.voice_user_id
         self._lock = asyncio.Lock()
 
     def set_wake_callback(
-        self, callback: Callable[[], Awaitable[None]] | None
+        self,
+        callback: Callable[[ChildVoiceEvidence], Awaitable[None]] | None,
     ) -> None:
         self._wake_callback = callback
 
-    def _schedule_wake_callback(self) -> None:
+    def _schedule_wake_callback(self, evidence: ChildVoiceEvidence) -> None:
         if self._wake_callback is not None:
-            asyncio.create_task(self._run_wake_callback())
+            asyncio.create_task(self._run_wake_callback(evidence))
 
-    async def _run_wake_callback(self) -> None:
+    async def _run_wake_callback(self, evidence: ChildVoiceEvidence) -> None:
         assert self._wake_callback is not None
         try:
-            await self._wake_callback()
+            await self._wake_callback(evidence)
         except Exception as exc:
             logger.warning("wake callback failed: %s", exc)
+
+    def identify_speaker(
+        self, user_id: str, *, confidence: float, reason: str
+    ) -> None:
+        user = self.repository.get_user(user_id)
+        if not user["enabled"]:
+            return
+        if self.state.user_id != user_id:
+            self._history.clear()
+        self.state.user_id = user_id
+        self.state.speaker_identity = str(user["display_name"])
+        self.state.speaker_identity_confidence = round(confidence, 3)
+        self.state.speaker_identity_reason = reason
+        self.state.speaker_identity_at = datetime.now(timezone.utc)
+        self.state.updated_at = datetime.now(timezone.utc)
+
+    def _reset_inferred_speaker(self) -> None:
+        if self.state.speaker_identity is not None:
+            self._history.clear()
+            self.state.user_id = self._base_user_id
+        self.state.speaker_identity = None
+        self.state.speaker_identity_confidence = None
+        self.state.speaker_identity_reason = None
+        self.state.speaker_identity_at = None
 
     def _ensure_codec(self) -> None:
         if self.codec is None:
@@ -714,10 +761,15 @@ class VoiceSessionManager:
             if target_user != self.state.user_id:
                 self._history.clear()
             self.state.enabled = True
+            self._base_user_id = target_user
             self.state.user_id = target_user
+            self._reset_inferred_speaker()
             self.state.awake = not bool(self.settings.voice_wake_word)
             self.state.last_wake_keyword = None
             self.state.wake_detected_at = None
+            self.state.last_wake_child_voice = None
+            self.state.last_wake_pitch_hz = None
+            self.state.last_wake_voiced_ratio = None
             self.state.last_heard_transcript = None
             self._wake_deadline = None
             self._set_mode(self._idle_mode())
@@ -751,6 +803,7 @@ class VoiceSessionManager:
             self._history.clear()
             self.state.awake = False
             self._wake_deadline = None
+            self._reset_inferred_speaker()
             self.state.error = None
             self._set_mode(VoiceMode.STOPPED)
         if await self.gateway.is_online():
@@ -788,6 +841,7 @@ class VoiceSessionManager:
         self.state.enabled = False
         self.state.awake = False
         self._wake_deadline = None
+        self._reset_inferred_speaker()
         self._set_mode(VoiceMode.STOPPED)
 
     async def ingest_opus(self, payload: bytes) -> None:
@@ -802,6 +856,7 @@ class VoiceSessionManager:
         self._ensure_codec()
         assert self.codec is not None
         pcm = self.codec.decode_microphone(payload)
+        self._wake_audio.append(pcm)
         if not self.state.awake and self.wake_detector is not None:
             keyword = self.wake_detector.accept_pcm(pcm)
             if keyword:
@@ -816,7 +871,8 @@ class VoiceSessionManager:
                     keyword,
                     self.wake_detector.last_frame_latency_ms,
                 )
-                await self._acknowledge_wake_word()
+                evidence = self._classify_wake_audio()
+                await self._acknowledge_wake_word(evidence)
                 return
         self._pre_roll.append(pcm)
         rms = audioop.rms(pcm, 2)
@@ -927,7 +983,9 @@ class VoiceSessionManager:
                         direct_answer = "我在，你说吧。"
                         wake_only_ack = True
                 if wake_reacquire_requested:
-                    self._schedule_wake_callback()
+                    evidence = self._child_voice_classifier.classify(pcm or b"")
+                    self._record_child_voice_evidence(evidence)
+                    self._schedule_wake_callback(evidence)
 
                 if transcript and self._is_sleep_phrase(transcript):
                     direct_answer = "好的，需要我时再叫我吧。"
@@ -1115,6 +1173,7 @@ class VoiceSessionManager:
             self.state.awake = False
             self._wake_deadline = None
             self._history.clear()
+            self._reset_inferred_speaker()
             if self.state.mode == VoiceMode.LISTENING:
                 self._set_mode(VoiceMode.WAITING_FOR_WAKE_WORD)
 
@@ -1153,6 +1212,13 @@ class VoiceSessionManager:
             self.state.user_id, include_pending=False
         )[:8]
         memory_text = "\n".join(f"- {item['content']}" for item in memories) or "- 无已确认记忆"
+        identity_instruction = ""
+        if self.state.speaker_identity:
+            identity_instruction = (
+                f"\n本轮已确认对话者是{self.state.speaker_identity}。"
+                f"可以在自然合适时称呼一次“{self.state.speaker_identity}”，"
+                "不要每句重复，也不要提及识别算法。"
+            )
         return (
             f"{preview['system_prompt']}\n\n"
             "当前是面对面语音对话。像熟悉的家人一样自然回应，不要重复用户的问题，"
@@ -1161,6 +1227,7 @@ class VoiceSessionManager:
             "Markdown、URL、JSON 或内部过程。\n"
             f"当前用户：{user['display_name']}；角色：{user['role']}；语言偏好：{user['locale']}。\n"
             f"仅可使用该用户自己的已确认记忆：\n{memory_text}"
+            f"{identity_instruction}"
         )
 
     def _set_mode(self, mode: VoiceMode) -> None:
@@ -1256,7 +1323,9 @@ class VoiceSessionManager:
             return None
         return pcm or None
 
-    async def _acknowledge_wake_word(self) -> None:
+    async def _acknowledge_wake_word(
+        self, evidence: ChildVoiceEvidence
+    ) -> None:
         """Give immediate audible feedback, then start a fresh command capture."""
         assert self.codec is not None
         cached_pcm = self._load_wake_ack_pcm()
@@ -1299,7 +1368,21 @@ class VoiceSessionManager:
         self._activate_wake_session()
         self._set_mode(self._idle_mode())
         await self._show_avatar("listening")
-        self._schedule_wake_callback()
+        self._schedule_wake_callback(evidence)
+
+    def _classify_wake_audio(self) -> ChildVoiceEvidence:
+        pcm = b"".join(self._wake_audio)
+        self._wake_audio.clear()
+        evidence = self._child_voice_classifier.classify(pcm)
+        self._record_child_voice_evidence(evidence)
+        return evidence
+
+    def _record_child_voice_evidence(
+        self, evidence: ChildVoiceEvidence
+    ) -> None:
+        self.state.last_wake_child_voice = evidence.is_child
+        self.state.last_wake_pitch_hz = evidence.median_pitch_hz
+        self.state.last_wake_voiced_ratio = evidence.voiced_ratio
 
     async def _show_avatar(self, emotion: str) -> None:
         if self.avatar_controller is None:

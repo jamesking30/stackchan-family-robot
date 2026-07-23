@@ -12,6 +12,12 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+from .child_identity import (
+    ChildFaceEvidence,
+    ChildVoiceEvidence,
+    InsightFaceAgeClassifier,
+    WakeIdentityEvidence,
+)
 from .gateway import DeviceOfflineError, MessageType, StackChanGateway
 from .settings import Settings
 
@@ -45,6 +51,18 @@ class ScanCandidate:
 
 class FaceDetector(Protocol):
     def detect(self, jpeg: bytes) -> list[FaceDetection]: ...
+
+
+class FaceAgeClassifier(Protocol):
+    def classify(
+        self,
+        jpeg: bytes,
+        *,
+        center_x: float,
+        center_y: float,
+        width: float,
+        height: float,
+    ) -> ChildFaceEvidence: ...
 
 
 class MediaPipeFaceDetector:
@@ -94,11 +112,14 @@ class PresenceTracker:
         gateway: StackChanGateway,
         voice_mode: Callable[[], str],
         detector: FaceDetector | None = None,
+        age_classifier: FaceAgeClassifier | None = None,
     ) -> None:
         self.settings = settings
         self.gateway = gateway
         self.voice_mode = voice_mode
         self._detector = detector
+        self._age_classifier = age_classifier
+        self._age_classifier_attempted = age_classifier is not None
         self._loop_task: asyncio.Task[None] | None = None
         self._operation_lock = asyncio.Lock()
         self._wake_reacquire_lock = asyncio.Lock()
@@ -121,6 +142,9 @@ class PresenceTracker:
         self.last_scan_at: datetime | None = None
         self.last_wake_reacquire_at: datetime | None = None
         self.last_wake_reacquire_found: bool | None = None
+        self.last_child_face: bool | None = None
+        self.last_estimated_age: int | None = None
+        self.last_child_identity_confidence: float | None = None
         self.last_error: str | None = None
 
     def snapshot(self) -> dict[str, object]:
@@ -140,6 +164,9 @@ class PresenceTracker:
             "last_scan_at": self.last_scan_at,
             "last_wake_reacquire_at": self.last_wake_reacquire_at,
             "last_wake_reacquire_found": self.last_wake_reacquire_found,
+            "last_child_face": self.last_child_face,
+            "last_estimated_age": self.last_estimated_age,
+            "last_child_identity_confidence": self.last_child_identity_confidence,
             "target_seen_at": self._target_seen_at,
             "manual_override_seconds": round(
                 max(0.0, self._manual_override_until - time.monotonic()), 1
@@ -180,13 +207,15 @@ class PresenceTracker:
         self._clear_target_metadata()
         self.mode = "manual_override"
 
-    async def reacquire_after_wake(self) -> None:
+    async def reacquire_after_wake(
+        self, voice_evidence: ChildVoiceEvidence | None = None
+    ) -> WakeIdentityEvidence | None:
         if (
             not self.enabled
             or self._wake_reacquire_lock.locked()
             or time.monotonic() < self._manual_override_until
         ):
-            return
+            return None
         async with self._wake_reacquire_lock:
             deadline = time.monotonic() + 12.0
             while self.voice_mode() not in {
@@ -197,15 +226,15 @@ class PresenceTracker:
                 if time.monotonic() >= deadline:
                     self.mode = "wake_deferred"
                     self._next_full_scan = 0.0
-                    return
+                    return None
                 await asyncio.sleep(0.1)
             if (
                 not await self.gateway.is_online()
                 or time.monotonic() < self._manual_override_until
             ):
-                return
+                return None
             async with self._operation_lock:
-                await self._quick_reacquire()
+                return await self._quick_reacquire(voice_evidence)
 
     async def scan_now(self, *, force: bool = False) -> dict[str, object]:
         if not self.enabled:
@@ -255,6 +284,21 @@ class PresenceTracker:
                 self.settings.presence_face_model,
                 self.settings.presence_min_confidence,
             )
+
+    def _ensure_age_classifier(self) -> FaceAgeClassifier | None:
+        if not self.settings.child_identity_enabled:
+            return None
+        if not self._age_classifier_attempted:
+            self._age_classifier_attempted = True
+            try:
+                self._age_classifier = InsightFaceAgeClassifier(
+                    self.settings.child_identity_age_model,
+                    self.settings.child_identity_maximum_age,
+                )
+            except Exception as exc:
+                logger.warning("child age classifier unavailable: %s", exc)
+                self._age_classifier = None
+        return self._age_classifier
 
     async def _full_scan(self, *, force: bool = False) -> None:
         self.mode = "scanning"
@@ -409,7 +453,9 @@ class PresenceTracker:
         self.target_yaw = self._current_yaw
         self.target_pitch = self._current_pitch
 
-    async def _quick_reacquire(self) -> None:
+    async def _quick_reacquire(
+        self, voice_evidence: ChildVoiceEvidence | None = None
+    ) -> WakeIdentityEvidence | None:
         self.mode = "wake_reacquire"
         self.last_error = None
         await self.gateway.send(MessageType.START_CAMERA_STREAM)
@@ -420,19 +466,60 @@ class PresenceTracker:
         finally:
             await self.gateway.send(MessageType.STOP_CAMERA_STREAM)
 
-        detections: list[FaceDetection] = []
+        detected_frames: list[tuple[FaceDetection, bytes]] = []
         assert self._detector is not None
         for frame in frames:
-            detections.extend(self._detector.detect(frame))
+            detected_frames.extend(
+                (detection, frame)
+                for detection in self._detector.detect(frame)
+            )
+        detections = [item[0] for item in detected_frames]
         self.last_wake_reacquire_at = datetime.now(timezone.utc)
         self.last_wake_reacquire_found = bool(detections)
         self.faces_detected = len(detections)
         if not detections:
             self.mode = "wake_no_target"
             self._next_full_scan = 0.0
-            return
+            self.last_child_face = None
+            self.last_estimated_age = None
+            self.last_child_identity_confidence = None
+            if voice_evidence is None:
+                return None
+            return WakeIdentityEvidence(voice_evidence, None)
 
         best = self._select_tracking_face(detections)
+        face_evidence: ChildFaceEvidence | None = None
+        age_classifier = self._ensure_age_classifier()
+        if age_classifier is not None and voice_evidence is not None:
+            best_frame = next(
+                frame
+                for detection, frame in detected_frames
+                if detection is best
+            )
+            try:
+                face_evidence = age_classifier.classify(
+                    best_frame,
+                    center_x=best.center_x,
+                    center_y=best.center_y,
+                    width=best.width,
+                    height=best.height,
+                )
+            except Exception as exc:
+                logger.warning("child face classification failed: %s", exc)
+        self.last_child_face = (
+            face_evidence.is_child if face_evidence is not None else None
+        )
+        self.last_estimated_age = (
+            face_evidence.estimated_age if face_evidence is not None else None
+        )
+        combined = (
+            WakeIdentityEvidence(voice_evidence, face_evidence)
+            if voice_evidence is not None
+            else None
+        )
+        self.last_child_identity_confidence = (
+            combined.confidence if combined is not None else None
+        )
         target_yaw = self._yaw_for_detection(self._current_yaw, best)
         target_pitch = self._pitch_for_detection(self._current_pitch, best)
         yaw_step = max(
@@ -459,6 +546,7 @@ class PresenceTracker:
         self._target_seen_at = datetime.now(timezone.utc)
         self._record_target(best, self._current_yaw, self._current_pitch)
         self.mode = "wake_tracking"
+        return combined
 
     def _select_tracking_face(
         self, detections: list[FaceDetection]
