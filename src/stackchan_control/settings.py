@@ -116,12 +116,12 @@ class Settings:
     )
     voice_gpt_sovits_prompt_text: str = "所以你今天就来见我了吗？哇，真令人开心呢。"
     voice_gpt_sovits_prompt_lang: str = "zh"
-    voice_gpt_sovits_speed: float = 0.96
+    voice_gpt_sovits_speed: float = 1.10
     voice_tts_base_url: str = "http://127.0.0.1:8766"
     voice_tts_model: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
     voice_tts_speaker: str = "Vivian"
-    voice_tts_instruction: str = "明亮、轻快、活泼、有精神，语速自然舒展，停顿从容；保持亲切自然，不要慵懒拖音，不要急促，不要尖叫或夸张卖萌。"
-    voice_tts_speed: float = 0.96
+    voice_tts_instruction: str = "明亮、轻快、灵动、有精神，语速稍快，停顿简洁；保持亲切俏皮，不要慵懒拖音，不要急促，不要尖叫或夸张卖萌。"
+    voice_tts_speed: float = 1.10
     voice_tts_fallback_to_system: bool = True
     voice_silence_ms: int = 420
     voice_min_speech_ms: int = 300
@@ -148,7 +148,7 @@ class Settings:
     )
     voice_wake_session_seconds: float = 45.0
     voice_sleep_phrases: tuple[str, ...] = ("再见", "休息吧", "不用了")
-    voice_wake_ack_pcm: Path = PROJECT_ROOT / "var/cache/voice/wake-ack-v2.wav"
+    voice_wake_ack_pcm: Path = PROJECT_ROOT / "var/cache/voice/wake-ack-v3.wav"
     voice_kws_enabled: bool = False
     voice_kws_model_dir: Path = (
         PROJECT_ROOT
@@ -326,7 +326,7 @@ class Settings:
             ),
             presence_wake_search_budget_seconds=float(
                 os.getenv(
-                    "ROBOT_PRESENCE_WAKE_SEARCH_BUDGET_SECONDS", "1.0"
+                    "ROBOT_PRESENCE_WAKE_SEARCH_BUDGET_SECONDS", "0.65"
                 )
             ),
             presence_wake_smooth_step_degrees=float(
@@ -447,7 +447,7 @@ class Settings:
                 "ROBOT_VOICE_GPT_SOVITS_PROMPT_LANG", "zh"
             ),
             voice_gpt_sovits_speed=float(
-                os.getenv("ROBOT_VOICE_GPT_SOVITS_SPEED", "0.96")
+                os.getenv("ROBOT_VOICE_GPT_SOVITS_SPEED", "1.10")
             ),
             voice_tts_base_url=os.getenv(
                 "ROBOT_VOICE_TTS_BASE_URL", "http://127.0.0.1:8766"
@@ -459,9 +459,9 @@ class Settings:
             voice_tts_speaker=os.getenv("ROBOT_VOICE_TTS_SPEAKER", "Vivian"),
             voice_tts_instruction=os.getenv(
                 "ROBOT_VOICE_TTS_INSTRUCTION",
-                "明亮、轻快、活泼、有精神，语速自然舒展，停顿从容；保持亲切自然，不要慵懒拖音，不要急促，不要尖叫或夸张卖萌。",
+                "明亮、轻快、灵动、有精神，语速稍快，停顿简洁；保持亲切俏皮，不要慵懒拖音，不要急促，不要尖叫或夸张卖萌。",
             ),
-            voice_tts_speed=float(os.getenv("ROBOT_VOICE_TTS_SPEED", "0.96")),
+            voice_tts_speed=float(os.getenv("ROBOT_VOICE_TTS_SPEED", "1.10")),
             voice_tts_fallback_to_system=os.getenv(
                 "ROBOT_VOICE_TTS_FALLBACK_TO_SYSTEM", "true"
             ).lower()
@@ -516,7 +516,7 @@ class Settings:
             voice_wake_ack_pcm=project_path(
                 os.getenv(
                     "ROBOT_VOICE_WAKE_ACK_PCM",
-                    str(PROJECT_ROOT / "var/cache/voice/wake-ack-v2.wav"),
+                    str(PROJECT_ROOT / "var/cache/voice/wake-ack-v3.wav"),
                 )
             ),
             voice_kws_enabled=os.getenv(

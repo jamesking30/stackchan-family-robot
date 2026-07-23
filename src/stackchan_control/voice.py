@@ -1152,6 +1152,7 @@ class VoiceSessionManager:
                 2,
             )
             if keyword:
+                wake_response_started = time.perf_counter()
                 if self._task is not None and not self._task.done():
                     task = self._task
                     self._task = None
@@ -1173,7 +1174,9 @@ class VoiceSessionManager:
                     self.wake_detector.last_frame_latency_ms,
                 )
                 evidence = self._classify_wake_audio()
-                await self._acknowledge_wake_word(evidence)
+                await self._acknowledge_wake_word(
+                    evidence, response_started=wake_response_started
+                )
                 return
         # A real streaming KWS detector is the only standby pipeline. Full
         # utterance capture and Whisper are enabled only after the wake event.
@@ -1734,15 +1737,21 @@ class VoiceSessionManager:
         return pcm or None
 
     async def _acknowledge_wake_word(
-        self, evidence: ChildVoiceEvidence
+        self,
+        evidence: ChildVoiceEvidence,
+        *,
+        response_started: float | None = None,
     ) -> None:
         """Give immediate audible feedback, then start a fresh command capture."""
         assert self.codec is not None
         cached_pcm = self._load_wake_ack_pcm()
         self._set_mode(VoiceMode.SPEAKING)
-        await self._show_avatar("listening")
         self._clear_audio()
         await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
+        wake_search_deadline = (
+            time.monotonic()
+            + self.settings.presence_wake_search_budget_seconds
+        )
         wake_task = self._schedule_wake_callback(evidence)
         await self.gateway.send_json(
             MessageType.TEXT_MESSAGE,
@@ -1770,27 +1779,32 @@ class VoiceSessionManager:
                         self._mouth_level(cached_pcm[start:end])
                     )
                 await self.gateway.send(MessageType.OPUS, packet)
+                if packet_index == 0 and response_started is not None:
+                    self._record_latency(
+                        "wake_ack_first_audio", response_started
+                    )
                 await asyncio.sleep(OpusCodec.SPEECH_FRAME_DURATION_MS / 1000)
             await self._show_speaking_frame(0)
         await asyncio.sleep(0.12)
         if wake_task is not None and not wake_task.done():
+            remaining = wake_search_deadline - time.monotonic()
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(wake_task),
-                    timeout=(
-                        self.settings.presence_wake_search_budget_seconds
-                        + 0.15
-                    ),
-                )
+                if remaining > 0:
+                    await asyncio.wait_for(
+                        asyncio.shield(wake_task),
+                        timeout=min(0.2, remaining),
+                    )
             except asyncio.TimeoutError:
                 pass
-        await self._wait_for_servo_quiet(max_wait_seconds=0.45)
+        await self._wait_for_servo_quiet(max_wait_seconds=0.12)
         await self.gateway.send(MessageType.START_AUDIO_STREAM)
         self._clear_audio()
         self._ignore_audio_until = time.monotonic() + 0.18
         self._activate_wake_session()
         self._set_mode(self._idle_mode())
         await self._show_avatar("listening")
+        if response_started is not None:
+            self._record_latency("wake_ready", response_started)
 
     def _classify_wake_audio(self) -> ChildVoiceEvidence:
         pcm = b"".join(self._wake_audio)
