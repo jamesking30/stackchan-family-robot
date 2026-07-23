@@ -509,28 +509,58 @@ class LocalDeepSeekVoiceProvider:
                 await process.stdin.drain()
             process.stdin.close()
 
-        async with httpx.AsyncClient(timeout=180) as client:
-            async with client.stream(
-                "POST", f"{self.gpt_sovits_base_url}/tts", json=payload
-            ) as response:
-                if not response.is_success:
-                    raise VoiceError(
-                        f"GPT-SoVITS stream failed with HTTP {response.status_code}"
-                    )
-                feeder = asyncio.create_task(feed(response))
-                assert process.stdout is not None
-                while chunk := await process.stdout.read(9600):
-                    yield chunk
-                await feeder
-        stderr = b""
-        if process.stderr is not None:
-            stderr = await process.stderr.read()
-        code = await process.wait()
-        if code != 0:
-            raise VoiceError(
-                f"streaming audio conversion failed: "
-                f"{stderr.decode(errors='replace')[-160:]}"
-            )
+        feeder: asyncio.Task[None] | None = None
+        try:
+            async with httpx.AsyncClient(timeout=180) as client:
+                async with client.stream(
+                    "POST", f"{self.gpt_sovits_base_url}/tts", json=payload
+                ) as response:
+                    if not response.is_success:
+                        raise VoiceError(
+                            "GPT-SoVITS stream failed with HTTP "
+                            f"{response.status_code}"
+                        )
+                    feeder = asyncio.create_task(feed(response))
+                    assert process.stdout is not None
+                    while chunk := await process.stdout.read(9600):
+                        yield chunk
+                    await feeder
+                    feeder = None
+            stderr = b""
+            if process.stderr is not None:
+                stderr = await process.stderr.read()
+            code = await process.wait()
+            if code != 0:
+                raise VoiceError(
+                    f"streaming audio conversion failed: "
+                    f"{stderr.decode(errors='replace')[-160:]}"
+                )
+        finally:
+            # A device disconnect cancels the voice turn while HTTP audio and
+            # ffmpeg may still be active. Reap both so the next wake can start
+            # immediately instead of inheriting a stuck stream.
+            if feeder is not None:
+                if not feeder.done():
+                    feeder.cancel()
+                try:
+                    await feeder
+                except BaseException:
+                    pass
+            if process.stdin is not None and not process.stdin.is_closing():
+                process.stdin.close()
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
 
     async def _synthesize_gpt_sovits(self, text: str) -> bytes:
         if not self.gpt_sovits_ref_audio.is_file():
@@ -832,6 +862,11 @@ class VoiceState:
     silero_vad_ready: bool = False
     silero_vad_speaking: bool = False
     endpoint_reason: str | None = None
+    playback_packets: int = 0
+    playback_segments: int = 0
+    playback_rebuffers: int = 0
+    playback_avatar_frames: int = 0
+    playback_max_packet_gap_ms: float = 0.0
     latency_ms: dict[str, float] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -871,6 +906,11 @@ class VoiceState:
             "silero_vad_ready": self.silero_vad_ready,
             "silero_vad_speaking": self.silero_vad_speaking,
             "endpoint_reason": self.endpoint_reason,
+            "playback_packets": self.playback_packets,
+            "playback_segments": self.playback_segments,
+            "playback_rebuffers": self.playback_rebuffers,
+            "playback_avatar_frames": self.playback_avatar_frames,
+            "playback_max_packet_gap_ms": self.playback_max_packet_gap_ms,
             "latency_ms": self.latency_ms,
             "updated_at": self.updated_at,
         }
@@ -1280,7 +1320,14 @@ class VoiceSessionManager:
         self._task = asyncio.create_task(
             self._run_turn(transcript.strip(), None, enforce_wake=False)
         )
-        await self._task
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            if not await self.gateway.is_online():
+                raise DeviceOfflineError(
+                    "device disconnected during voice playback"
+                ) from None
+            raise
         return self.state.snapshot()
 
     def _finish_utterance(self, endpoint_reason: str = "voice_activity_end") -> None:
@@ -1314,6 +1361,11 @@ class VoiceSessionManager:
         wake_only_ack = False
         turn_started = time.perf_counter()
         self.state.latency_ms = {}
+        self.state.playback_packets = 0
+        self.state.playback_segments = 0
+        self.state.playback_rebuffers = 0
+        self.state.playback_avatar_frames = 0
+        self.state.playback_max_packet_gap_ms = 0.0
         if endpoint_ms is not None:
             self.state.latency_ms["endpoint_wait"] = round(endpoint_ms, 1)
         if self.state.awake and self.state.wake_detected_at is not None:
@@ -1370,49 +1422,64 @@ class VoiceSessionManager:
             await self._show_avatar("thinking")
             instructions = self._instructions()
             answer = ""
-            first_segment = True
+            first_text_segment = True
+            first_audio_packet = True
             first_audio_chunk = True
             audio_next_send: float | None = None
             audio_burst_remaining = 6
             last_mouth_level: int | None = None
             last_mouth_update = 0.0
-            async for segment in self._response_segments(
-                instructions, transcript, direct_answer
-            ):
-                segment = self._clean_spoken_answer(segment)
-                if not segment:
-                    continue
-                if first_segment:
-                    self._record_latency("first_text", turn_started)
-                cached_pcm = (
-                    self._load_wake_ack_pcm()
-                    if wake_only_ack and first_segment
-                    else None
+            last_packet_sent_at: float | None = None
+            speech_events: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+            speech_producer = asyncio.create_task(
+                self._produce_speech_events(
+                    speech_events,
+                    instructions,
+                    transcript,
+                    direct_answer,
+                    wake_only_ack=wake_only_ack,
                 )
-                if not microphone_paused:
-                    self._set_mode(VoiceMode.SPEAKING)
-                    await self._show_speaking_frame(0)
-                    await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
-                    microphone_paused = True
-                    self._clear_audio()
-                separator = (
-                    " "
-                    if answer
-                    and re.search(r"[A-Za-z0-9][.!?]?$", answer)
-                    and re.match(r"[A-Za-z0-9]", segment)
-                    else ""
-                )
-                answer += separator + segment
-                self.state.response_text = answer
-                await self.gateway.send_json(
-                    MessageType.TEXT_MESSAGE,
-                    {"name": "爱莉", "content": answer[:240]},
-                )
-                async for speech_pcm in self._speech_chunks(segment, cached_pcm):
+            )
+            try:
+                while True:
+                    event, payload = await speech_events.get()
+                    if event == "done":
+                        break
+                    if event == "error":
+                        assert isinstance(payload, Exception)
+                        raise payload
+                    if event == "segment":
+                        segment = str(payload)
+                        self.state.playback_segments += 1
+                        if first_text_segment:
+                            self._record_latency("first_text", turn_started)
+                            first_text_segment = False
+                        if not microphone_paused:
+                            self._set_mode(VoiceMode.SPEAKING)
+                            await self._show_speaking_frame(0)
+                            await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
+                            microphone_paused = True
+                            self._clear_audio()
+                        separator = (
+                            " "
+                            if answer
+                            and re.search(r"[A-Za-z0-9][.!?]?$", answer)
+                            and re.match(r"[A-Za-z0-9]", segment)
+                            else ""
+                        )
+                        answer += separator + segment
+                        self.state.response_text = answer
+                        await self.gateway.send_json(
+                            MessageType.TEXT_MESSAGE,
+                            {"name": "爱莉", "content": answer[:240]},
+                        )
+                        continue
+                    if event != "audio":
+                        continue
+                    speech_pcm = bytes(payload)
                     if first_audio_chunk:
                         self._record_latency("first_audio_ready", turn_started)
                         first_audio_chunk = False
-                    speech_pcm = self._maximize_speech_pcm(speech_pcm)
                     assert self.codec is not None
                     packets = self.codec.encode_speech(speech_pcm)
                     frame_bytes = (
@@ -1422,7 +1489,7 @@ class VoiceSessionManager:
                         * 2
                     )
                     avatar_interval_frames = max(
-                        1, round(400 / OpusCodec.SPEECH_FRAME_DURATION_MS)
+                        1, round(600 / OpusCodec.SPEECH_FRAME_DURATION_MS)
                     )
                     for packet_index, packet in enumerate(packets):
                         now = time.perf_counter()
@@ -1434,6 +1501,7 @@ class VoiceSessionManager:
                             # startup or a segment-generation gap.
                             audio_burst_remaining = 6
                             audio_next_send = now
+                            self.state.playback_rebuffers += 1
                         if audio_burst_remaining <= 0:
                             delay = audio_next_send - now
                             if delay > 0:
@@ -1442,6 +1510,14 @@ class VoiceSessionManager:
                                 OpusCodec.SPEECH_FRAME_DURATION_MS / 1000
                             )
                         await self.gateway.send(MessageType.OPUS, packet)
+                        sent_at = time.perf_counter()
+                        if last_packet_sent_at is not None:
+                            self.state.playback_max_packet_gap_ms = max(
+                                self.state.playback_max_packet_gap_ms,
+                                round((sent_at - last_packet_sent_at) * 1000, 1),
+                            )
+                        last_packet_sent_at = sent_at
+                        self.state.playback_packets += 1
                         if audio_burst_remaining > 0:
                             audio_burst_remaining -= 1
                             if audio_burst_remaining == 0:
@@ -1461,14 +1537,22 @@ class VoiceSessionManager:
                             if (
                                 mouth_level != last_mouth_level
                                 and time.perf_counter() - last_mouth_update
-                                >= 0.4
+                                >= 0.6
                             ):
                                 await self._show_speaking_frame(mouth_level)
+                                self.state.playback_avatar_frames += 1
                                 last_mouth_level = mouth_level
                                 last_mouth_update = time.perf_counter()
-                        if first_segment:
+                        if first_audio_packet:
                             self._record_latency("first_audio_sent", turn_started)
-                            first_segment = False
+                            first_audio_packet = False
+            finally:
+                if not speech_producer.done():
+                    speech_producer.cancel()
+                try:
+                    await speech_producer
+                except asyncio.CancelledError:
+                    pass
             # The host intentionally stays about 120 ms ahead of playback.
             # Let the device drain that buffer before changing the large JPEG.
             await asyncio.sleep(0.12)
@@ -1583,6 +1667,41 @@ class VoiceSessionManager:
                 raise VoiceError("speech synthesis returned no streamed audio")
             return
         yield await self.provider.synthesize(text)
+
+    async def _produce_speech_events(
+        self,
+        queue: asyncio.Queue[tuple[str, object]],
+        instructions: str,
+        transcript: str,
+        direct_answer: str | None,
+        *,
+        wake_only_ack: bool,
+    ) -> None:
+        """Generate later speech segments while the device plays the current one."""
+        first_segment = True
+        try:
+            async for raw_segment in self._response_segments(
+                instructions, transcript, direct_answer
+            ):
+                segment = self._clean_spoken_answer(raw_segment)
+                if not segment:
+                    continue
+                await queue.put(("segment", segment))
+                cached_pcm = (
+                    self._load_wake_ack_pcm()
+                    if wake_only_ack and first_segment
+                    else None
+                )
+                async for speech_pcm in self._speech_chunks(segment, cached_pcm):
+                    if speech_pcm:
+                        await queue.put(
+                            ("audio", self._maximize_speech_pcm(speech_pcm))
+                        )
+                first_segment = False
+        except Exception as exc:
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("done", None))
 
     @staticmethod
     def _clean_spoken_answer(text: str) -> str:

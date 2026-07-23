@@ -238,5 +238,10 @@ class VoiceStateResponse(BaseModel):
     silero_vad_ready: bool = False
     silero_vad_speaking: bool = False
     endpoint_reason: str | None = None
+    playback_packets: int = 0
+    playback_segments: int = 0
+    playback_rebuffers: int = 0
+    playback_avatar_frames: int = 0
+    playback_max_packet_gap_ms: float = 0.0
     latency_ms: dict[str, float] = Field(default_factory=dict)
     updated_at: datetime
