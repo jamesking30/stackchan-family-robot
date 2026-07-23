@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import AsyncIterator, Protocol
+from typing import AsyncIterator, Awaitable, Callable, Protocol
 
 import httpx
 
@@ -667,7 +667,24 @@ class VoiceSessionManager:
         self._history: deque[dict[str, str]] = deque(maxlen=12)
         self._task: asyncio.Task[None] | None = None
         self._idle_animation_task: asyncio.Task[None] | None = None
+        self._wake_callback: Callable[[], Awaitable[None]] | None = None
         self._lock = asyncio.Lock()
+
+    def set_wake_callback(
+        self, callback: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        self._wake_callback = callback
+
+    def _schedule_wake_callback(self) -> None:
+        if self._wake_callback is not None:
+            asyncio.create_task(self._run_wake_callback())
+
+    async def _run_wake_callback(self) -> None:
+        assert self._wake_callback is not None
+        try:
+            await self._wake_callback()
+        except Exception as exc:
+            logger.warning("wake callback failed: %s", exc)
 
     def _ensure_codec(self) -> None:
         if self.codec is None:
@@ -891,6 +908,7 @@ class VoiceSessionManager:
             if self.settings.voice_wake_word and enforce_wake:
                 self._expire_wake_session()
                 wake_command = self._extract_wake_command(transcript)
+                wake_reacquire_requested = wake_command is not None
                 if not self.state.awake:
                     if wake_command is None:
                         self.state.transcript = None
@@ -908,6 +926,8 @@ class VoiceSessionManager:
                     if not transcript:
                         direct_answer = "我在，你说吧。"
                         wake_only_ack = True
+                if wake_reacquire_requested:
+                    self._schedule_wake_callback()
 
                 if transcript and self._is_sleep_phrase(transcript):
                     direct_answer = "好的，需要我时再叫我吧。"
@@ -1279,6 +1299,7 @@ class VoiceSessionManager:
         self._activate_wake_session()
         self._set_mode(self._idle_mode())
         await self._show_avatar("listening")
+        self._schedule_wake_callback()
 
     async def _show_avatar(self, emotion: str) -> None:
         if self.avatar_controller is None:

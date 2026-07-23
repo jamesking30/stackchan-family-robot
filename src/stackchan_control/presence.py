@@ -101,6 +101,7 @@ class PresenceTracker:
         self._detector = detector
         self._loop_task: asyncio.Task[None] | None = None
         self._operation_lock = asyncio.Lock()
+        self._wake_reacquire_lock = asyncio.Lock()
         self._manual_override_until = 0.0
         self._next_full_scan = 0.0
         self._current_yaw = 0.0
@@ -118,6 +119,8 @@ class PresenceTracker:
         self.target_scan_yaw: float | None = None
         self.target_scan_pitch: float | None = None
         self.last_scan_at: datetime | None = None
+        self.last_wake_reacquire_at: datetime | None = None
+        self.last_wake_reacquire_found: bool | None = None
         self.last_error: str | None = None
 
     def snapshot(self) -> dict[str, object]:
@@ -135,6 +138,8 @@ class PresenceTracker:
             "current_yaw": round(self._current_yaw, 1),
             "current_pitch": round(self._current_pitch, 1),
             "last_scan_at": self.last_scan_at,
+            "last_wake_reacquire_at": self.last_wake_reacquire_at,
+            "last_wake_reacquire_found": self.last_wake_reacquire_found,
             "target_seen_at": self._target_seen_at,
             "manual_override_seconds": round(
                 max(0.0, self._manual_override_until - time.monotonic()), 1
@@ -174,6 +179,33 @@ class PresenceTracker:
         self.target_pitch = None
         self._clear_target_metadata()
         self.mode = "manual_override"
+
+    async def reacquire_after_wake(self) -> None:
+        if (
+            not self.enabled
+            or self._wake_reacquire_lock.locked()
+            or time.monotonic() < self._manual_override_until
+        ):
+            return
+        async with self._wake_reacquire_lock:
+            deadline = time.monotonic() + 12.0
+            while self.voice_mode() not in {
+                "listening",
+                "waiting_for_wake_word",
+                "stopped",
+            }:
+                if time.monotonic() >= deadline:
+                    self.mode = "wake_deferred"
+                    self._next_full_scan = 0.0
+                    return
+                await asyncio.sleep(0.1)
+            if (
+                not await self.gateway.is_online()
+                or time.monotonic() < self._manual_override_until
+            ):
+                return
+            async with self._operation_lock:
+                await self._quick_reacquire()
 
     async def scan_now(self, *, force: bool = False) -> dict[str, object]:
         if not self.enabled:
@@ -376,6 +408,57 @@ class PresenceTracker:
         )
         self.target_yaw = self._current_yaw
         self.target_pitch = self._current_pitch
+
+    async def _quick_reacquire(self) -> None:
+        self.mode = "wake_reacquire"
+        self.last_error = None
+        await self.gateway.send(MessageType.START_CAMERA_STREAM)
+        try:
+            await asyncio.sleep(0.08)
+            self.gateway.clear_camera_frames()
+            frames = await self._collect_frames()
+        finally:
+            await self.gateway.send(MessageType.STOP_CAMERA_STREAM)
+
+        detections: list[FaceDetection] = []
+        assert self._detector is not None
+        for frame in frames:
+            detections.extend(self._detector.detect(frame))
+        self.last_wake_reacquire_at = datetime.now(timezone.utc)
+        self.last_wake_reacquire_found = bool(detections)
+        self.faces_detected = len(detections)
+        if not detections:
+            self.mode = "wake_no_target"
+            self._next_full_scan = 0.0
+            return
+
+        best = self._select_tracking_face(detections)
+        target_yaw = self._yaw_for_detection(self._current_yaw, best)
+        target_pitch = self._pitch_for_detection(self._current_pitch, best)
+        yaw_step = max(
+            -self.settings.presence_max_step_degrees,
+            min(
+                self.settings.presence_max_step_degrees,
+                target_yaw - self._current_yaw,
+            ),
+        )
+        pitch_step = max(
+            -self.settings.presence_max_pitch_step_degrees,
+            min(
+                self.settings.presence_max_pitch_step_degrees,
+                target_pitch - self._current_pitch,
+            ),
+        )
+        await self._move(
+            self._current_yaw + yaw_step,
+            self._current_pitch + pitch_step,
+        )
+        self.target_yaw = self._current_yaw
+        self.target_pitch = self._current_pitch
+        self._target_score = best.area * best.confidence
+        self._target_seen_at = datetime.now(timezone.utc)
+        self._record_target(best, self._current_yaw, self._current_pitch)
+        self.mode = "wake_tracking"
 
     def _select_tracking_face(
         self, detections: list[FaceDetection]

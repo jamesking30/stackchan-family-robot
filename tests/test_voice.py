@@ -212,6 +212,12 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
             wake_detector=detector,
         )
     ) as client:
+        wake_callbacks: list[str] = []
+
+        async def on_wake():
+            wake_callbacks.append("called")
+
+        client.app.state.voice.set_wake_callback(on_wake)
         with client.websocket_connect(WS_PATH, headers=DEVICE_HEADERS) as websocket:
             client.post(
                 "/v1/voice/start",
@@ -238,6 +244,10 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
             assert state["last_wake_keyword"] == "爱莉"
             assert state["mode"] == "listening"
             assert state["latency_ms"]["kws_frame"] == 3.2
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and not wake_callbacks:
+                time.sleep(0.01)
+            assert wake_callbacks == ["called"]
 
             client.post("/v1/voice/stop", headers=ADMIN_HEADERS)
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.STOP_AUDIO_STREAM

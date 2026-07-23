@@ -218,3 +218,42 @@ def test_tracking_keeps_centered_face_until_new_face_is_clearly_nearer(
         tracker._select_tracking_face([incumbent, clearly_larger])
         is clearly_larger
     )
+
+
+def test_wake_reacquire_makes_one_bounded_yaw_and_pitch_correction(
+    tmp_path: Path,
+):
+    gateway = FakeGateway()
+    face = FaceDetection(0.8, 0.2, 0.35, 0.35, 0.9)
+    tracker = PresenceTracker(
+        settings(tmp_path),
+        gateway,  # type: ignore[arg-type]
+        voice_mode=lambda: "listening",
+        detector=SequenceDetector([[face]]),
+    )
+
+    asyncio.run(tracker.reacquire_after_wake())
+    state = tracker.snapshot()
+
+    assert state["mode"] == "wake_tracking"
+    assert state["last_wake_reacquire_found"] is True
+    assert state["current_yaw"] == 5.0
+    assert state["current_pitch"] == 14.0
+
+
+def test_wake_reacquire_schedules_full_scan_when_current_view_is_empty(
+    tmp_path: Path,
+):
+    tracker = PresenceTracker(
+        settings(tmp_path),
+        FakeGateway(),  # type: ignore[arg-type]
+        voice_mode=lambda: "listening",
+        detector=SequenceDetector([[]]),
+    )
+    tracker._next_full_scan = 10**12
+
+    asyncio.run(tracker.reacquire_after_wake())
+
+    assert tracker.mode == "wake_no_target"
+    assert tracker.last_wake_reacquire_found is False
+    assert tracker._next_full_scan == 0.0

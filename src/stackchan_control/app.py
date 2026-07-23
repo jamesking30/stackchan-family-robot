@@ -131,6 +131,7 @@ def create_app(
         gateway,
         voice_mode=lambda: voice.state.mode.value,
     )
+    voice.set_wake_callback(presence.reacquire_after_wake)
 
     app = FastAPI(
         title="StackChan Family Robot Control API",

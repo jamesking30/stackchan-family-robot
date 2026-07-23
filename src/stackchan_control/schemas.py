@@ -142,6 +142,8 @@ class PresenceStateResponse(BaseModel):
     current_yaw: float
     current_pitch: float
     last_scan_at: datetime | None = None
+    last_wake_reacquire_at: datetime | None = None
+    last_wake_reacquire_found: bool | None = None
     target_seen_at: datetime | None = None
     manual_override_seconds: float
     camera_frames_persisted: bool
