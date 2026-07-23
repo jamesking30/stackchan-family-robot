@@ -1372,6 +1372,10 @@ class VoiceSessionManager:
             answer = ""
             first_segment = True
             first_audio_chunk = True
+            audio_next_send: float | None = None
+            audio_burst_remaining = 6
+            last_mouth_level: int | None = None
+            last_mouth_update = 0.0
             async for segment in self._response_segments(
                 instructions, transcript, direct_answer
             ):
@@ -1418,25 +1422,56 @@ class VoiceSessionManager:
                         * 2
                     )
                     avatar_interval_frames = max(
-                        1, round(100 / OpusCodec.SPEECH_FRAME_DURATION_MS)
+                        1, round(400 / OpusCodec.SPEECH_FRAME_DURATION_MS)
                     )
                     for packet_index, packet in enumerate(packets):
+                        now = time.perf_counter()
+                        if (
+                            audio_next_send is None
+                            or now - audio_next_send > 0.06
+                        ):
+                            # Build a small device-side jitter buffer after TTS
+                            # startup or a segment-generation gap.
+                            audio_burst_remaining = 6
+                            audio_next_send = now
+                        if audio_burst_remaining <= 0:
+                            delay = audio_next_send - now
+                            if delay > 0:
+                                await asyncio.sleep(delay)
+                            audio_next_send += (
+                                OpusCodec.SPEECH_FRAME_DURATION_MS / 1000
+                            )
+                        await self.gateway.send(MessageType.OPUS, packet)
+                        if audio_burst_remaining > 0:
+                            audio_burst_remaining -= 1
+                            if audio_burst_remaining == 0:
+                                audio_next_send = (
+                                    time.perf_counter()
+                                    + OpusCodec.SPEECH_FRAME_DURATION_MS / 1000
+                                )
                         if packet_index % avatar_interval_frames == 0:
                             start = packet_index * frame_bytes
                             end = min(
                                 len(speech_pcm),
                                 (packet_index + avatar_interval_frames) * frame_bytes,
                             )
-                            await self._show_speaking_frame(
-                                self._mouth_level(speech_pcm[start:end])
+                            mouth_level = self._mouth_level(
+                                speech_pcm[start:end]
                             )
-                        await self.gateway.send(MessageType.OPUS, packet)
+                            if (
+                                mouth_level != last_mouth_level
+                                and time.perf_counter() - last_mouth_update
+                                >= 0.4
+                            ):
+                                await self._show_speaking_frame(mouth_level)
+                                last_mouth_level = mouth_level
+                                last_mouth_update = time.perf_counter()
                         if first_segment:
                             self._record_latency("first_audio_sent", turn_started)
                             first_segment = False
-                        await asyncio.sleep(
-                            OpusCodec.SPEECH_FRAME_DURATION_MS / 1000
-                        )
+            # The host intentionally stays about 120 ms ahead of playback.
+            # Let the device drain that buffer before changing the large JPEG.
+            await asyncio.sleep(0.12)
             await self._show_speaking_frame(0)
             if not answer:
                 raise VoiceError("DeepSeek returned no spoken text")
@@ -1765,25 +1800,28 @@ class VoiceSessionManager:
                 // 1000
                 * 2
             )
-            avatar_interval_frames = max(
-                1, round(100 / OpusCodec.SPEECH_FRAME_DURATION_MS)
-            )
+            next_send: float | None = None
+            burst_remaining = 6
             for packet_index, packet in enumerate(packets):
-                if packet_index % avatar_interval_frames == 0:
-                    start = packet_index * frame_bytes
-                    end = min(
-                        len(cached_pcm),
-                        (packet_index + avatar_interval_frames) * frame_bytes,
-                    )
-                    await self._show_speaking_frame(
-                        self._mouth_level(cached_pcm[start:end])
-                    )
+                now = time.perf_counter()
+                if burst_remaining <= 0 and next_send is not None:
+                    delay = next_send - now
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    next_send += OpusCodec.SPEECH_FRAME_DURATION_MS / 1000
                 await self.gateway.send(MessageType.OPUS, packet)
+                if burst_remaining > 0:
+                    burst_remaining -= 1
+                    if burst_remaining == 0:
+                        next_send = (
+                            time.perf_counter()
+                            + OpusCodec.SPEECH_FRAME_DURATION_MS / 1000
+                        )
                 if packet_index == 0 and response_started is not None:
                     self._record_latency(
                         "wake_ack_first_audio", response_started
                     )
-                await asyncio.sleep(OpusCodec.SPEECH_FRAME_DURATION_MS / 1000)
+            await asyncio.sleep(0.12)
             await self._show_speaking_frame(0)
         await asyncio.sleep(0.12)
         if wake_task is not None and not wake_task.done():
