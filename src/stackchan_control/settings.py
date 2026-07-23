@@ -60,8 +60,8 @@ class Settings:
     presence_wake_search_yaw_offsets: tuple[float, ...] = (
         -18.0,
         18.0,
-        -32.0,
-        32.0,
+        -40.0,
+        40.0,
     )
     presence_wake_search_pitch_offsets: tuple[float, ...] = (-10.0, 10.0)
     presence_wake_search_settle_seconds: float = 0.16
@@ -262,7 +262,7 @@ class Settings:
                 float(item.strip())
                 for item in os.getenv(
                     "ROBOT_PRESENCE_WAKE_SEARCH_YAW_OFFSETS",
-                    "-18,18,-32,32",
+                    "-18,18,-40,40",
                 ).split(",")
                 if item.strip()
             ),
