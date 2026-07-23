@@ -130,7 +130,7 @@ def test_bilingual_voice_turn_stays_in_memory_and_reaches_robot(tmp_path: Path):
             assert state["awake"] is True
             assert provider.transcript == "你好"
             assert "角色：unassigned" in provider.instructions
-            assert "家庭与儿童安全优先级" in provider.instructions
+            assert "内容与行动边界" in provider.instructions
 
             stopped = client.post("/v1/voice/stop", headers=ADMIN_HEADERS).json()
             assert stopped["mode"] == "stopped"

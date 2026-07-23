@@ -4,5 +4,5 @@ default_locale: zh-CN
 supported_locales:
   - zh-CN
   - en-US
-audience: family
-revision: 3
+audience: personal-companion
+revision: 4

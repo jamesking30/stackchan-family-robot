@@ -3,7 +3,7 @@ def test_default_character_identity_is_aili(client):
     preview = client.get("/v1/characters/family-companion/prompt").json()
 
     assert "name: 爱莉 / Aili" in active["documents"]["manifest"]
-    assert "你是家庭机器人“爱莉（Aili）”" in preview["system_prompt"]
+    assert "你是机器人“爱莉（Aili）”" in preview["system_prompt"]
     assert "zh-CN: 爱莉" in preview["system_prompt"]
     assert "en-US: Aili" in preview["system_prompt"]
 
@@ -28,7 +28,7 @@ def test_character_change_is_versioned_and_reversible(client):
     preview = client.get("/v1/characters/family-companion/prompt").json()
     assert preview["version"] == changed["version"]
     assert "回答只使用一句话" in preview["system_prompt"]
-    assert "家庭与儿童安全" in preview["system_prompt"]
+    assert "内容与行动边界" in preview["system_prompt"]
 
     rolled_back = client.post(
         "/v1/characters/family-companion/rollback",
