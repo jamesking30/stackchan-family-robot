@@ -67,6 +67,19 @@ class Settings:
     )
     voice_wake_session_seconds: float = 45.0
     voice_sleep_phrases: tuple[str, ...] = ("再见", "休息吧", "不用了")
+    voice_wake_ack_pcm: Path = PROJECT_ROOT / "var/cache/voice/wake-ack.pcm"
+    voice_kws_enabled: bool = False
+    voice_kws_model_dir: Path = (
+        PROJECT_ROOT
+        / "var/models/sherpa/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+    )
+    voice_kws_keywords_file: Path = (
+        PROJECT_ROOT
+        / "var/models/sherpa/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+        / "keywords.txt"
+    )
+    voice_kws_score: float = 2.0
+    voice_kws_threshold: float = 0.20
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -173,5 +186,40 @@ class Settings:
                     "ROBOT_VOICE_SLEEP_PHRASES", "再见,休息吧,不用了"
                 ).split(",")
                 if item.strip()
+            ),
+            voice_wake_ack_pcm=project_path(
+                os.getenv(
+                    "ROBOT_VOICE_WAKE_ACK_PCM",
+                    str(PROJECT_ROOT / "var/cache/voice/wake-ack.pcm"),
+                )
+            ),
+            voice_kws_enabled=os.getenv(
+                "ROBOT_VOICE_KWS_ENABLED", "false"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            voice_kws_model_dir=project_path(
+                os.getenv(
+                    "ROBOT_VOICE_KWS_MODEL_DIR",
+                    str(
+                        PROJECT_ROOT
+                        / "var/models/sherpa"
+                        / "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+                    ),
+                )
+            ),
+            voice_kws_keywords_file=project_path(
+                os.getenv(
+                    "ROBOT_VOICE_KWS_KEYWORDS_FILE",
+                    str(
+                        PROJECT_ROOT
+                        / "var/models/sherpa"
+                        / "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+                        / "keywords.txt"
+                    ),
+                )
+            ),
+            voice_kws_score=float(os.getenv("ROBOT_VOICE_KWS_SCORE", "2.0")),
+            voice_kws_threshold=float(
+                os.getenv("ROBOT_VOICE_KWS_THRESHOLD", "0.20")
             ),
         )

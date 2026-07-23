@@ -67,15 +67,23 @@ def main() -> int:
         "gpt_sovits_service": False,
         "qwen_fallback_service": False,
         "robot_online": False,
+        "voice_ready": False,
+        "wake_word_ready": False,
+        "voice_mode": "unknown",
         "problems": [],
     }
     problems = result["problems"]
     assert isinstance(problems, list)
 
     try:
-        result["control_service"] = bool(request_json("/health").get("ok"))
+        health = request_json("/health")
+        result["control_service"] = bool(health.get("ok"))
+        result["voice_ready"] = bool(health.get("voice_ready"))
+        result["wake_word_ready"] = bool(health.get("wake_word_ready"))
         state = request_json("/v1/device/state", admin=True)
         result["robot_online"] = bool(state.get("online"))
+        voice_state = request_json("/v1/voice/state", admin=True)
+        result["voice_mode"] = str(voice_state.get("mode", "unknown"))
     except (OSError, ValueError, urllib.error.URLError) as exc:
         problems.append(f"control service unavailable: {exc}")
 
@@ -99,6 +107,10 @@ def main() -> int:
         problems.append("robot websocket is offline")
     if not result["gpt_sovits_service"]:
         problems.append("GPT-SoVITS primary voice is unavailable")
+    if not result["voice_ready"]:
+        problems.append("voice session is not ready")
+    if not result["wake_word_ready"]:
+        problems.append("wake-word detector is not ready")
 
     output = ROOT / "var/health/latest.json"
     output.parent.mkdir(parents=True, exist_ok=True)

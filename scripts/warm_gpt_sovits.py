@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -12,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "var/models/gpt-sovits/elysia/reference-happy.wav"
+ACK_CACHE = ROOT / "var/cache/voice/wake-ack.pcm"
 
 
 def main() -> int:
@@ -28,7 +30,7 @@ def main() -> int:
 
     payload = json.dumps(
         {
-            "text": "爱莉准备好了！",
+            "text": "我在，你说吧。",
             "text_lang": "zh",
             "ref_audio_path": str(REFERENCE),
             "prompt_text": "所以你今天就来见我了吗？哇，真令人开心呢。",
@@ -51,9 +53,35 @@ def main() -> int:
     )
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
-            response.read()
+            wav_audio = response.read()
     except (OSError, urllib.error.URLError):
         return 1
+    ACK_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    conversion = subprocess.run(
+        [
+            "/opt/homebrew/bin/ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "pipe:1",
+        ],
+        input=wav_audio,
+        capture_output=True,
+        check=False,
+    )
+    if conversion.returncode != 0 or not conversion.stdout:
+        return 1
+    ACK_CACHE.write_bytes(conversion.stdout)
     return 0
 
 

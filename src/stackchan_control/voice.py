@@ -24,6 +24,7 @@ import httpx
 from .gateway import DeviceOfflineError, MessageType, StackChanGateway
 from .repository import RobotRepository
 from .settings import Settings
+from .wake import SherpaWakeWordDetector, WakeWordDetector
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,30 @@ class VoiceError(RuntimeError):
 
 class NoSpeechDetected(VoiceError):
     pass
+
+
+def resolve_local_executable(command: str) -> str:
+    """Resolve Homebrew tools even when launchd provides a minimal PATH."""
+    expanded = Path(command).expanduser()
+    if expanded.is_absolute():
+        if expanded.is_file():
+            return str(expanded)
+        raise VoiceError(f"local executable was not found: {expanded}")
+
+    discovered = shutil.which(command)
+    if discovered:
+        return discovered
+
+    for directory in (
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+        Path("/usr/bin"),
+        Path("/bin"),
+    ):
+        candidate = directory / command
+        if candidate.is_file():
+            return str(candidate)
+    raise VoiceError(f"local executable was not found: {command}")
 
 
 class VoiceMode(str, Enum):
@@ -69,7 +94,9 @@ class LocalDeepSeekVoiceProvider:
         self.api_key = settings.deepseek_api_key
         self.base_url = settings.deepseek_base_url.rstrip("/")
         self.model = settings.deepseek_model
-        self.whisper_binary = settings.voice_whisper_binary
+        self.whisper_binary = resolve_local_executable(settings.voice_whisper_binary)
+        self.say_binary = resolve_local_executable("say")
+        self.ffmpeg_binary = resolve_local_executable("ffmpeg")
         self.whisper_model = settings.voice_whisper_model
         self.zh_voice = settings.voice_zh_name
         self.en_voice = settings.voice_en_name
@@ -86,12 +113,8 @@ class LocalDeepSeekVoiceProvider:
         self.tts_speed = settings.voice_tts_speed
         self.tts_fallback_to_system = settings.voice_tts_fallback_to_system
 
-        if shutil.which(self.whisper_binary) is None:
-            raise VoiceError(f"local Whisper binary was not found: {self.whisper_binary}")
         if not self.whisper_model.is_file():
             raise VoiceError(f"local Whisper model was not found: {self.whisper_model}")
-        if shutil.which("say") is None or shutil.which("ffmpeg") is None:
-            raise VoiceError("local speech synthesis requires macOS say and ffmpeg")
 
     @property
     def headers(self) -> dict[str, str]:
@@ -339,7 +362,7 @@ class LocalDeepSeekVoiceProvider:
         with tempfile.TemporaryDirectory(prefix="stackchan-tts-") as temp_dir:
             aiff_path = Path(temp_dir) / "speech.aiff"
             say_process = await asyncio.create_subprocess_exec(
-                "say",
+                self.say_binary,
                 "-v",
                 voice,
                 "-o",
@@ -359,10 +382,9 @@ class LocalDeepSeekVoiceProvider:
             raise VoiceError("local speech synthesis returned no audio")
         return pcm
 
-    @staticmethod
-    async def _convert_audio_to_pcm(audio: bytes) -> bytes:
+    async def _convert_audio_to_pcm(self, audio: bytes) -> bytes:
         convert_process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
+            self.ffmpeg_binary,
             "-nostdin",
             "-v",
             "error",
@@ -524,11 +546,15 @@ class VoiceState:
     turn_id: int = 0
     wake_word: str = ""
     awake: bool = False
+    last_wake_keyword: str | None = None
+    wake_detected_at: datetime | None = None
+    last_heard_transcript: str | None = None
     transcript: str | None = None
     response_text: str | None = None
     error: str | None = None
     audio_rms: int = 0
     audio_peak_rms: int = 0
+    latency_ms: dict[str, float] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def snapshot(self) -> dict[str, object]:
@@ -539,11 +565,15 @@ class VoiceState:
             "turn_id": self.turn_id,
             "wake_word": self.wake_word,
             "awake": self.awake,
+            "last_wake_keyword": self.last_wake_keyword,
+            "wake_detected_at": self.wake_detected_at,
+            "last_heard_transcript": self.last_heard_transcript,
             "transcript": self.transcript,
             "response_text": self.response_text,
             "error": self.error,
             "audio_rms": self.audio_rms,
             "audio_peak_rms": self.audio_peak_rms,
+            "latency_ms": self.latency_ms,
             "updated_at": self.updated_at,
         }
 
@@ -558,12 +588,14 @@ class VoiceSessionManager:
         gateway: StackChanGateway,
         provider: VoiceProvider | None = None,
         codec: OpusCodec | None = None,
+        wake_detector: WakeWordDetector | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.gateway = gateway
         self.provider = provider
         self.codec = codec
+        self.wake_detector = wake_detector
         self.state = VoiceState(user_id=settings.voice_user_id)
         self.state.wake_word = settings.voice_wake_word
         self._pre_roll: deque[bytes] = deque(maxlen=5)
@@ -585,12 +617,20 @@ class VoiceSessionManager:
         if self.provider is None:
             self.provider = LocalDeepSeekVoiceProvider(self.settings)
 
+    def _ensure_wake_detector(self) -> None:
+        if self.settings.voice_kws_enabled and self.wake_detector is None:
+            try:
+                self.wake_detector = SherpaWakeWordDetector(self.settings)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise VoiceError(f"wake-word detector failed to start: {exc}") from exc
+
     async def start(self, user_id: str | None = None) -> dict[str, object]:
         target_user = user_id or self.state.user_id
         user = self.repository.get_user(target_user)
         if not user["enabled"]:
             raise VoiceError(f"user {target_user} is disabled")
         self._ensure_codec()
+        self._ensure_wake_detector()
         if not await self.gateway.is_online():
             raise DeviceOfflineError("device is offline")
         async with self._lock:
@@ -599,6 +639,9 @@ class VoiceSessionManager:
             self.state.enabled = True
             self.state.user_id = target_user
             self.state.awake = not bool(self.settings.voice_wake_word)
+            self.state.last_wake_keyword = None
+            self.state.wake_detected_at = None
+            self.state.last_heard_transcript = None
             self._wake_deadline = None
             self._set_mode(self._idle_mode())
             self.state.error = None
@@ -606,7 +649,10 @@ class VoiceSessionManager:
             self.state.response_text = None
             self.state.audio_rms = 0
             self.state.audio_peak_rms = 0
+            self.state.latency_ms = {}
             self._clear_audio()
+            if self.wake_detector is not None:
+                self.wake_detector.reset()
             self._history.clear()
             self._ignore_audio_until = time.monotonic() + 0.35
         try:
@@ -677,6 +723,24 @@ class VoiceSessionManager:
         self._ensure_codec()
         assert self.codec is not None
         pcm = self.codec.decode_microphone(payload)
+        if not self.state.awake and self.wake_detector is not None:
+            keyword = self.wake_detector.accept_pcm(pcm)
+            if keyword:
+                self._activate_wake_session()
+                self.state.last_wake_keyword = keyword
+                self.state.wake_detected_at = datetime.now(timezone.utc)
+                self.state.latency_ms = {
+                    "kws_frame": self.wake_detector.last_frame_latency_ms
+                }
+                logger.info(
+                    "wake word detected keyword=%s frame_ms=%.1f",
+                    keyword,
+                    self.wake_detector.last_frame_latency_ms,
+                )
+                await self.gateway.send_json(
+                    MessageType.TEXT_MESSAGE,
+                    {"name": "爱莉", "content": "我在听…"},
+                )
         self._pre_roll.append(pcm)
         rms = audioop.rms(pcm, 2)
         self.state.audio_rms = rms
@@ -750,13 +814,18 @@ class VoiceSessionManager:
     ) -> None:
         microphone_paused = False
         sleep_after_reply = False
+        wake_only_ack = False
+        turn_started = time.perf_counter()
+        self.state.latency_ms = {}
         try:
             self._ensure_provider()
             assert self.provider is not None
             if transcript is None:
                 self._set_mode(VoiceMode.TRANSCRIBING)
                 transcript = await self.provider.transcribe(self._wav(pcm or b""))
+                self._record_latency("asr", turn_started)
             original_transcript = transcript
+            self.state.last_heard_transcript = original_transcript
             direct_answer: str | None = None
             if self.settings.voice_wake_word and enforce_wake:
                 self._expire_wake_session()
@@ -772,8 +841,12 @@ class VoiceSessionManager:
                     transcript = wake_command
                     if not transcript:
                         direct_answer = "我在，你说吧。"
+                        wake_only_ack = True
                 elif wake_command is not None:
                     transcript = wake_command
+                    if not transcript:
+                        direct_answer = "我在，你说吧。"
+                        wake_only_ack = True
 
                 if transcript and self._is_sleep_phrase(transcript):
                     direct_answer = "好的，需要我时再叫我吧。"
@@ -784,13 +857,24 @@ class VoiceSessionManager:
             self._set_mode(VoiceMode.THINKING)
             instructions = self._instructions()
             answer = ""
+            first_segment = True
             async for segment in self._response_segments(
                 instructions, transcript, direct_answer
             ):
                 segment = self._clean_spoken_answer(segment)
                 if not segment:
                     continue
-                speech_pcm = await self.provider.synthesize(segment)
+                if first_segment:
+                    self._record_latency("first_text", turn_started)
+                speech_pcm = (
+                    self._load_wake_ack_pcm()
+                    if wake_only_ack and first_segment
+                    else None
+                )
+                if speech_pcm is None:
+                    speech_pcm = await self.provider.synthesize(segment)
+                if first_segment:
+                    self._record_latency("first_audio_ready", turn_started)
                 speech_pcm = self._maximize_speech_pcm(speech_pcm)
                 if not microphone_paused:
                     self._set_mode(VoiceMode.SPEAKING)
@@ -813,6 +897,9 @@ class VoiceSessionManager:
                 assert self.codec is not None
                 for packet in self.codec.encode_speech(speech_pcm):
                     await self.gateway.send(MessageType.OPUS, packet)
+                    if first_segment:
+                        self._record_latency("first_audio_sent", turn_started)
+                        first_segment = False
                     await asyncio.sleep(0.06)
             if not answer:
                 raise VoiceError("DeepSeek returned no spoken text")
@@ -836,6 +923,8 @@ class VoiceSessionManager:
             elif self.state.awake:
                 self._activate_wake_session()
             self.state.error = None
+            self._record_latency("turn_total", turn_started)
+            logger.info("voice turn latency_ms=%s", self.state.latency_ms)
             self._set_mode(self._idle_mode())
         except asyncio.CancelledError:
             self._set_mode(self._idle_mode())
@@ -848,8 +937,17 @@ class VoiceSessionManager:
             self._ignore_audio_until = time.monotonic() + 0.5
             self._set_mode(self._idle_mode())
         except Exception as exc:
+            logger.exception("voice turn failed")
             self.state.error = str(exc)[:240]
-            self._set_mode(VoiceMode.ERROR)
+            self._clear_audio()
+            if self.state.enabled and await self.gateway.is_online():
+                # A transient ASR, model, or TTS failure must not permanently
+                # disable wake-word listening. Keep the error visible while
+                # returning the state machine to an ingestible mode.
+                self._ignore_audio_until = time.monotonic() + 0.5
+                self._set_mode(self._idle_mode())
+            else:
+                self._set_mode(VoiceMode.ERROR)
         finally:
             if microphone_paused and self.state.enabled and await self.gateway.is_online():
                 self._clear_audio()
@@ -963,6 +1061,19 @@ class VoiceSessionManager:
     def _set_mode(self, mode: VoiceMode) -> None:
         self.state.mode = mode
         self.state.updated_at = datetime.now(timezone.utc)
+
+    def _record_latency(self, stage: str, started: float) -> None:
+        self.state.latency_ms[stage] = round(
+            (time.perf_counter() - started) * 1000,
+            1,
+        )
+
+    def _load_wake_ack_pcm(self) -> bytes | None:
+        path = self.settings.voice_wake_ack_pcm
+        if not path.is_file():
+            return None
+        pcm = path.read_bytes()
+        return pcm or None
 
     def _clear_audio(self) -> None:
         self._pre_roll.clear()

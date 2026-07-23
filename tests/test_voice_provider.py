@@ -8,6 +8,8 @@ from stackchan_control.settings import PROJECT_ROOT, Settings
 from stackchan_control.voice import (
     LocalDeepSeekVoiceProvider,
     NoSpeechDetected,
+    VoiceError,
+    resolve_local_executable,
 )
 
 
@@ -76,6 +78,31 @@ class FakeGptSovitsClient:
             content=b"RIFF-gpt-sovits-wav",
             request=httpx.Request("POST", url),
         )
+
+
+def test_resolve_local_executable_uses_homebrew_when_path_is_minimal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    homebrew_bin = tmp_path / "opt" / "homebrew" / "bin"
+    homebrew_bin.mkdir(parents=True)
+    executable = homebrew_bin / "whisper-cli"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr("stackchan_control.voice.shutil.which", lambda _: None)
+    monkeypatch.setattr(
+        "stackchan_control.voice.Path",
+        lambda value: (
+            executable.parent
+            if value == "/opt/homebrew/bin"
+            else Path(value)
+        ),
+    )
+
+    assert resolve_local_executable("whisper-cli") == str(executable)
+
+
+def test_resolve_local_executable_rejects_missing_absolute_path(tmp_path: Path):
+    with pytest.raises(VoiceError, match="local executable was not found"):
+        resolve_local_executable(str(tmp_path / "missing"))
 
 
 def test_deepseek_text_provider_uses_v4_without_thinking(

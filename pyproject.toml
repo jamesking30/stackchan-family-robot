@@ -10,9 +10,15 @@ requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
+  "numpy>=1.26,<3",
   "pydantic>=2.8,<3",
   "python-dotenv>=1.1,<2",
+  "pypinyin>=0.55,<1",
   "PyYAML>=6,<7",
+  "sentencepiece>=0.2,<1",
+  # 1.13.x currently returns no KWS results on macOS arm64 with the tested
+  # Zipformer models; 1.12.40 is verified against their bundled test audio.
+  "sherpa-onnx==1.12.40",
   "uvicorn[standard]>=0.30,<1",
 ]
 

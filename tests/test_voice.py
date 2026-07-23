@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -54,6 +55,22 @@ class FakeOpusCodec:
     def encode_speech(self, pcm: bytes) -> list[bytes]:
         assert pcm
         return [b"speaker-opus"]
+
+
+class FakeWakeDetector:
+    last_frame_latency_ms = 3.2
+
+    def __init__(self):
+        self.triggered = False
+
+    def accept_pcm(self, pcm: bytes) -> str | None:
+        if not self.triggered:
+            self.triggered = True
+            return "爱莉"
+        return None
+
+    def reset(self) -> None:
+        self.triggered = False
 
 
 def test_bilingual_voice_turn_stays_in_memory_and_reaches_robot(tmp_path: Path):
@@ -165,6 +182,47 @@ def test_background_speech_does_not_reach_deepseek(tmp_path: Path):
             assert provider.answer_calls == 0
 
 
+def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path):
+    detector = FakeWakeDetector()
+    settings = Settings(
+        db_path=tmp_path / "kws.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        admin_api_key="admin-secret",
+        device_api_key="device-secret",
+        voice_kws_enabled=True,
+    )
+    with TestClient(
+        create_app(
+            settings,
+            voice_provider=FakeVoiceProvider(),
+            voice_codec=FakeOpusCodec(),
+            wake_detector=detector,
+        )
+    ) as client:
+        with client.websocket_connect(WS_PATH, headers=DEVICE_HEADERS) as websocket:
+            client.post(
+                "/v1/voice/start",
+                headers=ADMIN_HEADERS,
+                json={"user_id": "user-2"},
+            )
+            assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.START_AUDIO_STREAM
+            time.sleep(0.4)
+
+            websocket.send_bytes(pack_frame(MessageType.OPUS, b"microphone-opus"))
+            feedback = unpack_frame(websocket.receive_bytes())
+            assert feedback.message_type == MessageType.TEXT_MESSAGE
+            assert json.loads(feedback.payload)["content"] == "我在听…"
+
+            state = client.get("/v1/voice/state", headers=ADMIN_HEADERS).json()
+            assert state["awake"] is True
+            assert state["last_wake_keyword"] == "爱莉"
+            assert state["latency_ms"]["kws_frame"] == 3.2
+
+            client.post("/v1/voice/stop", headers=ADMIN_HEADERS)
+            assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.STOP_AUDIO_STREAM
+
+
 def test_wake_word_variants_and_sleep_phrases(tmp_path: Path):
     settings = Settings(
         db_path=tmp_path / "wake-parser.db",
@@ -230,3 +288,18 @@ def test_synthesized_speech_is_peak_normalized_to_full_scale():
         abs(int.from_bytes(maximized[index : index + 2], "little", signed=True))
         for index in range(0, len(maximized), 2)
     ) <= 32700
+
+
+def test_cached_wake_ack_is_loaded_from_runtime_cache(tmp_path: Path):
+    cached_pcm = b"\x01\x00" * 320
+    ack_path = tmp_path / "wake-ack.pcm"
+    ack_path.write_bytes(cached_pcm)
+    settings = Settings(
+        db_path=tmp_path / "wake-cache.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        voice_wake_ack_pcm=ack_path,
+    )
+    manager = VoiceSessionManager(settings, None, None)  # type: ignore[arg-type]
+
+    assert manager._load_wake_ack_pcm() == cached_pcm

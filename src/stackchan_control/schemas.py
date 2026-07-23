@@ -167,9 +167,13 @@ class VoiceStateResponse(BaseModel):
     turn_id: int
     wake_word: str = ""
     awake: bool = False
+    last_wake_keyword: str | None = None
+    wake_detected_at: datetime | None = None
+    last_heard_transcript: str | None = None
     transcript: str | None = None
     response_text: str | None = None
     error: str | None = None
     audio_rms: int = 0
     audio_peak_rms: int = 0
+    latency_ms: dict[str, float] = Field(default_factory=dict)
     updated_at: datetime

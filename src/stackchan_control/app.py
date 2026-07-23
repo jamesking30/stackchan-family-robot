@@ -48,7 +48,14 @@ from .schemas import (
     VoiceTextTurn,
 )
 from .settings import Settings
-from .voice import OpusCodec, VoiceError, VoiceProvider, VoiceSessionManager
+from .voice import (
+    OpusCodec,
+    VoiceError,
+    VoiceMode,
+    VoiceProvider,
+    VoiceSessionManager,
+)
+from .wake import WakeWordDetector
 
 
 EXPRESSION_PROFILES = {
@@ -94,6 +101,7 @@ def create_app(
     settings: Settings | None = None,
     voice_provider: VoiceProvider | None = None,
     voice_codec: OpusCodec | None = None,
+    wake_detector: WakeWordDetector | None = None,
 ) -> FastAPI:
     current_settings = settings or Settings.from_env()
     if current_settings.host not in {"127.0.0.1", "localhost", "::1"} and not (
@@ -110,6 +118,7 @@ def create_app(
         gateway,
         provider=voice_provider,
         codec=voice_codec,
+        wake_detector=wake_detector,
     )
 
     app = FastAPI(
@@ -190,6 +199,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, object]:
+        voice_ready = voice.state.enabled and voice.state.mode != VoiceMode.ERROR
         return {
             "ok": True,
             "service": "stackchan-control",
@@ -199,6 +209,14 @@ def create_app(
             "voice_configured": bool(
                 current_settings.deepseek_api_key
                 and current_settings.voice_whisper_model.is_file()
+            ),
+            "voice_ready": voice_ready,
+            "wake_word_ready": bool(
+                voice_ready
+                and (
+                    not current_settings.voice_kws_enabled
+                    or voice.wake_detector is not None
+                )
             ),
         }
 
