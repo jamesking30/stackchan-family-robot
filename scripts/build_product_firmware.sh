@@ -14,13 +14,13 @@ STACKCHAN_REPO_DIR="$PROJECT_ROOT/firmware/upstream/stackchan"
 PATCH_APPLIED=0
 cleanup_product_patch() {
   if [[ "$PATCH_APPLIED" == "1" ]]; then
-    git -C "$STACKCHAN_REPO_DIR" apply --reverse "$PRODUCT_PATCH"
+    git -C "$STACKCHAN_REPO_DIR" apply --unidiff-zero --reverse "$PRODUCT_PATCH"
   fi
 }
 trap cleanup_product_patch EXIT
 
-git -C "$STACKCHAN_REPO_DIR" apply --check "$PRODUCT_PATCH"
-git -C "$STACKCHAN_REPO_DIR" apply "$PRODUCT_PATCH"
+git -C "$STACKCHAN_REPO_DIR" apply --unidiff-zero --check "$PRODUCT_PATCH"
+git -C "$STACKCHAN_REPO_DIR" apply --unidiff-zero "$PRODUCT_PATCH"
 PATCH_APPLIED=1
 
 CONFIG_DIR="${STACKCHAN_FIRMWARE_CONFIG_DIR:-$PROJECT_ROOT/var/firmware-config}"

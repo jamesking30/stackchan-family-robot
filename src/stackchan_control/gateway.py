@@ -37,6 +37,7 @@ class MessageType(IntEnum):
     START_AUDIO_STREAM = 0x18
     STOP_AUDIO_STREAM = 0x19
     VOICE_ACTIVITY = 0x1A
+    SOUND_DIRECTION = 0x1B
 
 
 class ProtocolError(ValueError):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import secrets
 import time
 from typing import Annotated
@@ -60,6 +62,9 @@ from .voice import (
     VoiceSessionManager,
 )
 from .wake import WakeWordDetector
+
+
+logger = logging.getLogger(__name__)
 
 
 EXPRESSION_PROFILES = {
@@ -131,6 +136,7 @@ def create_app(
         gateway,
         voice_mode=lambda: voice.state.mode.value,
         voice_is_speaking=lambda: voice.is_capturing_speech,
+        motion_observer=voice.note_servo_motion,
     )
 
     async def handle_wake(evidence):
@@ -360,6 +366,25 @@ def create_app(
                         await voice.ingest_opus(frame.payload)
                     elif frame.message_type == MessageType.VOICE_ACTIVITY:
                         await voice.voice_activity(bool(frame.payload[:1] == b"\x01"))
+                    elif frame.message_type == MessageType.SOUND_DIRECTION:
+                        try:
+                            direction = json.loads(
+                                frame.payload.decode("utf-8")
+                            )
+                            presence.note_sound_direction(
+                                float(direction["relativeYaw"]),
+                                float(direction["confidence"]),
+                            )
+                        except (
+                            KeyError,
+                            TypeError,
+                            ValueError,
+                            UnicodeDecodeError,
+                            json.JSONDecodeError,
+                        ):
+                            logger.warning(
+                                "ignored malformed sound-direction frame"
+                            )
                 elif message.get("text") is not None:
                     await gateway.record_text(session)
         except (WebSocketDisconnect, DeviceOfflineError, asyncio.CancelledError):
@@ -429,6 +454,7 @@ def create_app(
     )
     async def device_motion(body: RobotMotionCommand) -> dict[str, object]:
         presence.note_manual_override(body.yaw_degrees, body.pitch_degrees)
+        voice.note_servo_motion(0.75)
         await gateway.send_json(
             MessageType.CONTROL_MOTION,
             {

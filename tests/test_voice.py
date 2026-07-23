@@ -9,7 +9,7 @@ from stackchan_control.app import create_app
 from stackchan_control.gateway import MessageType, pack_frame, unpack_frame
 from stackchan_control.repository import RobotRepository
 from stackchan_control.settings import PROJECT_ROOT, Settings
-from stackchan_control.voice import OpusCodec, VoiceSessionManager
+from stackchan_control.voice import OpusCodec, VoiceMode, VoiceSessionManager
 
 
 ADMIN_HEADERS = {"X-Robot-Admin-Key": "admin-secret"}
@@ -145,7 +145,9 @@ def test_bilingual_voice_turn_stays_in_memory_and_reaches_robot(tmp_path: Path):
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.STOP_AUDIO_STREAM
 
 
-def test_background_speech_does_not_reach_deepseek(tmp_path: Path):
+def test_audio_without_human_vad_does_not_reach_asr_or_deepseek(
+    tmp_path: Path,
+):
     provider = FakeVoiceProvider("今天晚上吃什么")
     settings = Settings(
         db_path=tmp_path / "wake-gate.db",
@@ -168,21 +170,18 @@ def test_background_speech_does_not_reach_deepseek(tmp_path: Path):
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.START_AUDIO_STREAM
             time.sleep(0.4)
 
+            websocket.send_bytes(pack_frame(MessageType.VOICE_ACTIVITY, b"\x00"))
             for _ in range(6):
                 websocket.send_bytes(pack_frame(MessageType.OPUS, b"microphone-opus"))
             for _ in range(13):
                 websocket.send_bytes(pack_frame(MessageType.OPUS, b"silence-opus"))
 
-            deadline = time.monotonic() + 2
-            while time.monotonic() < deadline and provider.transcribe_calls == 0:
-                time.sleep(0.01)
-            while time.monotonic() < deadline:
-                state = client.get("/v1/voice/state", headers=ADMIN_HEADERS).json()
-                if provider.transcribe_calls and state["mode"] == "waiting_for_wake_word":
-                    break
-                time.sleep(0.01)
+            time.sleep(0.2)
+            state = client.get(
+                "/v1/voice/state", headers=ADMIN_HEADERS
+            ).json()
 
-            assert provider.transcribe_calls == 1
+            assert provider.transcribe_calls == 0
             assert state["awake"] is False
             assert state["turn_id"] == 0
             assert state["transcript"] is None
@@ -349,6 +348,38 @@ def test_voice_requires_online_device_and_admin_key(tmp_path: Path):
             json={"user_id": "user-2"},
         )
         assert response.status_code == 409
+
+
+def test_servo_noise_is_not_started_as_speech_even_when_device_vad_fires(
+    tmp_path: Path,
+):
+    settings = Settings(
+        db_path=tmp_path / "servo-noise.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        voice_device_vad_enabled=True,
+    )
+    manager = VoiceSessionManager(
+        settings,
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        codec=FakeOpusCodec(),
+    )
+    manager.state.enabled = True
+    manager.state.mode = VoiceMode.LISTENING
+    manager.note_servo_motion(0.5)
+
+    async def feed_noise():
+        await manager.voice_activity(True)
+        for _ in range(8):
+            await manager.ingest_opus(b"microphone-opus")
+
+    import asyncio
+
+    asyncio.run(feed_noise())
+
+    assert manager.is_capturing_speech is False
+    assert manager.state.suppressed_background_frames == 8
 
 
 def test_quiet_microphone_pcm_is_centered_and_amplified():

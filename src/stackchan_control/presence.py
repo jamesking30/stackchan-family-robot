@@ -241,11 +241,13 @@ class PresenceTracker:
         body_head_estimator: BodyHeadEstimator | None = None,
         age_classifier: FaceAgeClassifier | None = None,
         voice_is_speaking: Callable[[], bool] | None = None,
+        motion_observer: Callable[[float], None] | None = None,
     ) -> None:
         self.settings = settings
         self.gateway = gateway
         self.voice_mode = voice_mode
         self.voice_is_speaking = voice_is_speaking or (lambda: False)
+        self.motion_observer = motion_observer
         self._detector = detector
         self._body_head_estimator = body_head_estimator
         self._body_head_estimator_attempted = body_head_estimator is not None
@@ -273,6 +275,11 @@ class PresenceTracker:
         self.last_scan_at: datetime | None = None
         self.last_wake_reacquire_at: datetime | None = None
         self.last_wake_reacquire_found: bool | None = None
+        self.last_sound_direction: float | None = None
+        self.last_sound_direction_confidence: float | None = None
+        self.last_sound_direction_at: datetime | None = None
+        self._sound_guided_yaw: float | None = None
+        self._sound_direction_monotonic = 0.0
         self.body_guidance_count = 0
         self.last_body_guided_at: datetime | None = None
         self.last_child_face: bool | None = None
@@ -297,6 +304,11 @@ class PresenceTracker:
             "last_scan_at": self.last_scan_at,
             "last_wake_reacquire_at": self.last_wake_reacquire_at,
             "last_wake_reacquire_found": self.last_wake_reacquire_found,
+            "last_sound_direction": self.last_sound_direction,
+            "last_sound_direction_confidence": (
+                self.last_sound_direction_confidence
+            ),
+            "last_sound_direction_at": self.last_sound_direction_at,
             "body_guidance_enabled": (
                 self.settings.presence_body_guidance_enabled
             ),
@@ -345,6 +357,23 @@ class PresenceTracker:
         self.target_pitch = None
         self._clear_target_metadata()
         self.mode = "manual_override"
+
+    def note_sound_direction(
+        self, relative_yaw: float, confidence: float
+    ) -> None:
+        """Record a short-lived two-microphone hint for the next wake search."""
+        if not math.isfinite(relative_yaw) or not math.isfinite(confidence):
+            return
+        if confidence < 0.4 or abs(relative_yaw) > 90:
+            return
+        self.last_sound_direction = round(relative_yaw, 1)
+        self.last_sound_direction_confidence = round(confidence, 3)
+        self.last_sound_direction_at = datetime.now(timezone.utc)
+        self._sound_direction_monotonic = time.monotonic()
+        self._sound_guided_yaw = max(
+            -45.0,
+            min(45.0, self._current_yaw + relative_yaw),
+        )
 
     async def reacquire_after_wake(
         self, voice_evidence: ChildVoiceEvidence | None = None
@@ -403,7 +432,8 @@ class PresenceTracker:
                         await self._track_target()
                 interval = (
                     self.settings.presence_active_tracking_interval_seconds
-                    if self.voice_mode() == "listening"
+                    if self.voice_mode()
+                    in {"listening", "thinking", "speaking"}
                     else self.settings.presence_tracking_interval_seconds
                 )
                 await asyncio.sleep(interval)
@@ -425,7 +455,13 @@ class PresenceTracker:
     def _can_track(self) -> bool:
         return (
             self.voice_mode()
-            in {"waiting_for_wake_word", "listening", "stopped"}
+            in {
+                "waiting_for_wake_word",
+                "listening",
+                "thinking",
+                "speaking",
+                "stopped",
+            }
             and not self.voice_is_speaking()
             and time.monotonic() >= self._manual_override_until
         )
@@ -629,6 +665,14 @@ class PresenceTracker:
         starting_yaw = self._current_yaw
         starting_pitch = self._current_pitch
         search_poses = [(starting_yaw, starting_pitch)]
+        if (
+            self._sound_guided_yaw is not None
+            and time.monotonic() - self._sound_direction_monotonic <= 2.0
+            and abs(self._sound_guided_yaw - starting_yaw) >= 4.0
+        ):
+            search_poses.append(
+                (self._sound_guided_yaw, starting_pitch)
+            )
         search_poses.extend(
             (
                 max(-45.0, min(45.0, starting_yaw + offset)),
@@ -648,9 +692,15 @@ class PresenceTracker:
         ] = []
         body_guidance_used = False
         body_head_estimator = self._ensure_body_head_estimator()
+        search_deadline = (
+            time.monotonic()
+            + self.settings.presence_wake_search_budget_seconds
+        )
         await self.gateway.send(MessageType.START_CAMERA_STREAM)
         try:
             for pose_index, (yaw, pitch) in enumerate(search_poses):
+                if pose_index and time.monotonic() >= search_deadline:
+                    break
                 if pose_index:
                     if self.voice_is_speaking():
                         break
@@ -883,6 +933,16 @@ class PresenceTracker:
         yaw = max(-45.0, min(45.0, yaw))
         pitch = self._current_pitch if pitch is None else pitch
         pitch = max(0.0, min(45.0, pitch))
+        distance = max(
+            abs(yaw - self._current_yaw),
+            abs(pitch - self._current_pitch),
+        )
+        if self.motion_observer is not None and distance >= 0.2:
+            estimated_seconds = max(
+                0.16,
+                min(0.75, distance / 90.0 + 0.12),
+            )
+            self.motion_observer(estimated_seconds)
         await self.gateway.send_json(
             MessageType.CONTROL_MOTION,
             {

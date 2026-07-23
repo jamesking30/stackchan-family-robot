@@ -113,6 +113,10 @@ def generate(args: argparse.Namespace) -> dict[str, object]:
     sdkconfig = (
         f'CONFIG_STACKCHAN_SERVER_URL="{gateway_url}"\n'
         f'CONFIG_OTA_URL="{ota_url}"\n'
+        "# CONFIG_SR_NSN_WEBRTC is not set\n"
+        "CONFIG_SR_NSN_NSNET2=y\n"
+        "# CONFIG_SR_VADN_WEBRTC is not set\n"
+        "CONFIG_SR_VADN_VADNET1_MEDIUM=y\n"
     )
     header = (
         "#pragma once\n\n"

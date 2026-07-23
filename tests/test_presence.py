@@ -308,6 +308,31 @@ def test_wake_reacquire_searches_nearby_pose_before_deferring(
     assert tracker.snapshot()["current_yaw"] == -18.0
 
 
+def test_recent_sound_direction_is_checked_before_generic_search(
+    tmp_path: Path,
+):
+    face = FaceDetection(0.5, 0.45, 0.35, 0.35, 0.9)
+    tracker = PresenceTracker(
+        settings(
+            tmp_path,
+            presence_wake_search_yaw_offsets=(-18.0,),
+            presence_wake_search_pitch_offsets=(),
+        ),
+        FakeGateway(),  # type: ignore[arg-type]
+        voice_mode=lambda: "speaking",
+        detector=SequenceDetector([[], [face]]),
+    )
+    tracker.note_sound_direction(25.0, 0.8)
+
+    asyncio.run(tracker.reacquire_after_wake())
+    state = tracker.snapshot()
+
+    assert state["mode"] == "wake_tracking"
+    assert state["current_yaw"] == 25.0
+    assert state["last_sound_direction"] == 25.0
+    assert state["last_sound_direction_confidence"] == 0.8
+
+
 def test_wake_reacquire_uses_body_to_preposition_then_confirms_face(
     tmp_path: Path,
 ):

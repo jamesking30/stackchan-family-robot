@@ -144,6 +144,9 @@ class PresenceStateResponse(BaseModel):
     last_scan_at: datetime | None = None
     last_wake_reacquire_at: datetime | None = None
     last_wake_reacquire_found: bool | None = None
+    last_sound_direction: float | None = None
+    last_sound_direction_confidence: float | None = None
+    last_sound_direction_at: datetime | None = None
     body_guidance_enabled: bool = False
     body_guidance_available: bool = False
     body_guidance_count: int = 0
@@ -225,5 +228,8 @@ class VoiceStateResponse(BaseModel):
     error: str | None = None
     audio_rms: int = 0
     audio_peak_rms: int = 0
+    device_vad_available: bool = False
+    device_vad_speaking: bool = False
+    suppressed_background_frames: int = 0
     latency_ms: dict[str, float] = Field(default_factory=dict)
     updated_at: datetime

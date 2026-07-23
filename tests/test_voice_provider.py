@@ -243,6 +243,15 @@ def test_streaming_answer_is_split_on_natural_sentence_boundaries():
     assert tail == "还有一点"
 
 
+def test_streaming_answer_uses_long_comma_clause_for_faster_first_audio():
+    segments, tail = LocalDeepSeekVoiceProvider._pop_spoken_segments(
+        "让我先看看你刚刚提到的那个问题，然后我们一起决定。"
+    )
+
+    assert segments == ["让我先看看你刚刚提到的那个问题，", "然后我们一起决定。"]
+    assert tail == ""
+
+
 def test_local_neural_tts_uses_qwen_serena_and_bounded_tokens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

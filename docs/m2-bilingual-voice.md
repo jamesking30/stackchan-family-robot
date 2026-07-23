@@ -6,6 +6,7 @@ M2 采用 Mac 编排、StackChan 实时采播的本地优先结构：
 
 1. Avatar 应用收到 Mac 的 `START_AUDIO_STREAM` 后才打开麦克风。
 2. 设备以 16kHz、60ms 单声道 Opus 帧发送音频，并发送设备侧 VAD 开始/结束事件。
+   专用固件开机自动进入 AVATAR，不再依赖触屏手动打开应用。
 3. Mac 在内存中解码音频；本地 Whisper 使用系统临时目录完成转写，任务结束立即删除临时 WAV。
 4. Mac 从当前角色版本、当前用户权限和该用户已确认记忆构造提示，仅把文字发送给 DeepSeek Chat Completions 得到短回答。
 5. Mac 上的 GPT-SoVITS v2 使用已训练音色在本地合成语音，再转换为 24kHz PCM、编码成 20ms、48kbps VBR Opus 帧下发；回答文字同时显示在脸部界面。Qwen3-TTS 是自动备用音色。
@@ -13,9 +14,9 @@ M2 采用 Mac 编排、StackChan 实时采播的本地优先结构：
 
 语音服务启动后默认处于本地唤醒检测状态。只有句首出现“爱莉”或已配置的同音识别别名时才开始对话；唤醒后 45 秒内可连续对话，每次有效交互会续期。说“再见”“休息吧”或“不用了”会立即回到待唤醒状态。未唤醒的环境语音只在 Mac 本地做短暂转写检测，不发送给 DeepSeek，也不进入记忆。
 
-CoreS3 当前没有达到可靠全双工回声消除，因此播放回答时会暂停硬件麦克风，播完后经过保护间隔再恢复。主机侧能量 VAD 负责完整句尾检测；转写前会移除直流偏置并归一化低音量录音。本地 Whisper 自动识别失败时依次在本机重试中文和英文，空音频、韩语静音幻觉及常见“字幕制作”幻觉会被丢弃，不发送给 DeepSeek。下行 TTS 在 Opus 编码前做安全满幅峰值归一化，以充分使用扬声器的数字动态范围。
+CoreS3 当前没有达到可靠全双工回声消除，因此播放回答时会暂停硬件麦克风，播完后经过保护间隔再恢复。句首检测采用“设备 VAD + 动态能量门限”双重确认；舵机运动是已知的本机噪声源，尚未开始说话时，运动及尾音保护窗口内的帧会被直接隔离，即使设备 VAD 被电机声误触发也不会送入 Whisper。已经开始的人声不会被小幅居中动作截断。转写前会移除直流偏置并归一化低音量录音。本地 Whisper 自动识别失败时依次在本机重试中文和英文，空音频、环境音括注、韩语静音幻觉及常见“字幕制作”幻觉会被丢弃，不发送给 DeepSeek。下行 TTS 在 Opus 编码前做安全满幅峰值归一化，以充分使用扬声器的数字动态范围。
 
-对话 V1 使用动态噪声底线判断语音开始，句尾默认静音等待为 600ms，过短语句会自动放宽以防止切断。DeepSeek 回答使用流式输出，主机在第一个完整短句生成后即开始合成和播放。每个唤醒会话在内存中保留最近 6 轮问答，会话休眠、超时、停止或设备断开后立即清除。回答在播放前还会移除 URL、Markdown 和表情符号，避免系统音色读出非口语内容。
+对话 V1 的句尾默认静音等待缩短为 420ms，设备 VAD 结束时可在 360ms 收口，过短语句会自动放宽以防止切断。DeepSeek 回答使用流式输出，主机在第一个完整短句或足够长的逗号分句生成后即开始合成和播放，减少首段语音等待。每个唤醒会话在内存中保留最近 6 轮问答，会话休眠、超时、停止或设备断开后立即清除。回答在播放前还会移除 URL、Markdown 和表情符号，避免系统音色读出非口语内容。
 
 默认会话使用 `user-2`（`unassigned`），在人脸识别 M3 完成前不推断成人身份或使用成人权限。角色安全文档始终排在用户话语和记忆之前。
 
@@ -55,6 +56,10 @@ ROBOT_VOICE_WAKE_WORD=爱莉
 ROBOT_VOICE_WAKE_ALIASES="艾莉,爱丽,艾丽,爱里,爱莉希雅,Ai Li,Aili,Ali,Ally,Eli,Ellie"
 ROBOT_VOICE_WAKE_SESSION_SECONDS=45
 ROBOT_VOICE_SLEEP_PHRASES=再见,休息吧,不用了
+ROBOT_VOICE_SILENCE_MS=420
+ROBOT_VOICE_DEVICE_VAD_ENABLED=true
+ROBOT_VOICE_DEVICE_VAD_HANGOVER_MS=240
+ROBOT_VOICE_SERVO_NOISE_GUARD_MS=320
 ```
 
 两套 TTS 使用独立虚拟环境：GPT-SoVITS 监听本机端口 `9880`，Qwen 备用服务监听 `8766`，均不与机器人主服务混装依赖。GPT-SoVITS 安装脚本会复制训练权重到不受 Git 跟踪的 `var/`，不会修改下载目录中的原件。
@@ -86,7 +91,10 @@ robotctl voice stop
 ./scripts/build_product_firmware.sh --gateway-host 192.168.31.65
 ```
 
-当前 M2 镜像 SHA-256 为 `6f1dbc1e100f48b2de8648a49c0095783f8b3a1d56e1e13300de2fcd84224e10`，大小 `0x39cb70`，仍有 27% OTA 应用分区余量。资源镜像未变化。
+产品固件启用 NSNet2 模型选项和 VADNet1 Medium 模型选项，并在产品补丁中
+固定开机进入本地 AVATAR。每次构建都会生成新的 SHA-256 和部署清单，实际
+值以 `var/firmware-build/product-m5stack-stack-chan-b72b3ede/firmware-manifest.json`
+为准，避免文档中的哈希随源码变更失效。
 
 ## 隐私与故障边界
 
@@ -97,8 +105,11 @@ robotctl voice stop
 - 状态接口提供当前与本轮峰值 RMS 数字，用于现场校准麦克风，不包含可还原的录音数据。
 - 设备离线时拒绝开始会话；停止和打断会取消后台任务并清空设备播放队列。
 - DeepSeek 失败时只记录状态码、错误代码和请求 ID，不记录密钥或原始音频。
-- 摄像头流仍保持关闭。
+- 摄像头流仅在本机内存中用于人脸/人体定位，不写入数据库、日志或文件。
 
-## 尚待现场验证
+## 现场状态
 
-设备麦克风、主机侧 VAD 和 Opus 上行已通过真机验证；DeepSeek V4 Flash、本地中文 TTS 和本地 Whisper 回读也已分别通过。剩余验收项是把完整回答通过 StackChan 扬声器播放，并完成连续中英切换与打断测试。
+设备麦克风、设备 VAD 事件、舵机噪声帧抑制、Opus 上行、DeepSeek、本地
+Whisper 和 GPT-SoVITS 均已通过独立或链路验收。运行状态接口中的
+`device_vad_available` 与 `suppressed_background_frames` 可用于持续观察
+设备 VAD 是否在线以及背景帧是否被门控。

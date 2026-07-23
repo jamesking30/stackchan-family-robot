@@ -128,3 +128,19 @@ index 0fc43ec..2571567 100644
      std::mutex _mutex;
      std::queue<ReceivedMessage> _msg_queue;
  
+diff --git a/firmware/main/main.cpp b/firmware/main/main.cpp
+--- a/firmware/main/main.cpp
++++ b/firmware/main/main.cpp
+@@ -29,2 +29,3 @@ extern "C" void app_main(void)
+-    const bool skip_mooncake =
+-        GetHAL().getXiaozhiConfig().startAiAgentOnBoot && GetHAL().getWarmRebootTarget() < 0;
++    // This patch is only applied to the dedicated family-robot product build.
++    // Stay in Mooncake and open AVATAR below so unattended boots reconnect locally.
++    const bool skip_mooncake = false;
+@@ -36 +37 @@ extern "C" void app_main(void)
+-        GetMooncake().installApp(std::make_unique<AppAvatar>());
++        const int avatar_app_id = GetMooncake().installApp(std::make_unique<AppAvatar>());
+@@ -41,0 +43,3 @@ extern "C" void app_main(void)
++
++        // AVATAR owns the authenticated local WebSocket/audio/camera transport.
++        GetMooncake().openApp(avatar_app_id);

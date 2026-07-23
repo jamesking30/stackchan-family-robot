@@ -40,7 +40,7 @@ class Settings:
     presence_start_delay_seconds: float = 5.0
     presence_scan_interval_seconds: float = 300.0
     presence_tracking_interval_seconds: float = 5.0
-    presence_active_tracking_interval_seconds: float = 2.0
+    presence_active_tracking_interval_seconds: float = 0.75
     presence_servo_settle_seconds: float = 0.55
     presence_frame_timeout_seconds: float = 1.0
     presence_frames_per_pose: int = 2
@@ -72,6 +72,7 @@ class Settings:
     presence_wake_search_pitch_offsets: tuple[float, ...] = (-10.0, 10.0)
     presence_wake_search_settle_seconds: float = 0.16
     presence_wake_search_frame_timeout_seconds: float = 0.28
+    presence_wake_search_budget_seconds: float = 1.0
     presence_wake_smooth_step_degrees: float = 6.0
     presence_wake_smooth_step_seconds: float = 0.06
     presence_target_switch_ratio: float = 1.25
@@ -116,9 +117,12 @@ class Settings:
     voice_tts_instruction: str = "明亮、轻快、活泼、有精神，语速稍快，句尾干净利落；保持亲切自然，不要慵懒拖音，不要尖叫或夸张卖萌。"
     voice_tts_speed: float = 1.08
     voice_tts_fallback_to_system: bool = True
-    voice_silence_ms: int = 600
+    voice_silence_ms: int = 420
     voice_min_speech_ms: int = 300
     voice_max_speech_seconds: int = 15
+    voice_device_vad_enabled: bool = True
+    voice_device_vad_hangover_ms: int = 240
+    voice_servo_noise_guard_ms: int = 320
     voice_wake_word: str = "爱莉"
     voice_wake_aliases: tuple[str, ...] = (
         "艾莉",
@@ -221,7 +225,7 @@ class Settings:
             ),
             presence_active_tracking_interval_seconds=float(
                 os.getenv(
-                    "ROBOT_PRESENCE_ACTIVE_TRACKING_INTERVAL_SECONDS", "2"
+                    "ROBOT_PRESENCE_ACTIVE_TRACKING_INTERVAL_SECONDS", "0.75"
                 )
             ),
             presence_servo_settle_seconds=float(
@@ -306,6 +310,11 @@ class Settings:
             presence_wake_search_frame_timeout_seconds=float(
                 os.getenv(
                     "ROBOT_PRESENCE_WAKE_SEARCH_FRAME_TIMEOUT_SECONDS", "0.28"
+                )
+            ),
+            presence_wake_search_budget_seconds=float(
+                os.getenv(
+                    "ROBOT_PRESENCE_WAKE_SEARCH_BUDGET_SECONDS", "1.0"
                 )
             ),
             presence_wake_smooth_step_degrees=float(
@@ -424,10 +433,20 @@ class Settings:
                 "ROBOT_VOICE_TTS_FALLBACK_TO_SYSTEM", "true"
             ).lower()
             in {"1", "true", "yes", "on"},
-            voice_silence_ms=int(os.getenv("ROBOT_VOICE_SILENCE_MS", "600")),
+            voice_silence_ms=int(os.getenv("ROBOT_VOICE_SILENCE_MS", "420")),
             voice_min_speech_ms=int(os.getenv("ROBOT_VOICE_MIN_SPEECH_MS", "300")),
             voice_max_speech_seconds=int(
                 os.getenv("ROBOT_VOICE_MAX_SPEECH_SECONDS", "15")
+            ),
+            voice_device_vad_enabled=os.getenv(
+                "ROBOT_VOICE_DEVICE_VAD_ENABLED", "true"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            voice_device_vad_hangover_ms=int(
+                os.getenv("ROBOT_VOICE_DEVICE_VAD_HANGOVER_MS", "240")
+            ),
+            voice_servo_noise_guard_ms=int(
+                os.getenv("ROBOT_VOICE_SERVO_NOISE_GUARD_MS", "320")
             ),
             voice_wake_word=os.getenv("ROBOT_VOICE_WAKE_WORD", "爱莉").strip(),
             voice_wake_aliases=tuple(

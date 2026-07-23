@@ -200,10 +200,16 @@ class LocalDeepSeekVoiceProvider:
         compact = re.sub(
             r"\b([A-Za-z]{2,40})\1\b", r"\1", compact, flags=re.IGNORECASE
         )
+        environmental_caption = re.fullmatch(
+            r"[\(\（\[].{1,60}[\)\）\]]"
+            r"(?:\s*[-–—,:]\s*[A-Za-z]{1,24}[.!?]?)?",
+            compact,
+        )
         if (
             not compact
             or compact.upper() in {"[BLANK_AUDIO]", "[NO SPEECH]", "(BLANK AUDIO)"}
             or re.fullmatch(r"[\(\（\[].{1,40}[\)\）\]]", compact)
+            or environmental_caption
             or re.search(r"[\uac00-\ud7af]", compact)
             or re.search(r"字幕.{0,4}(製作|制作|提供)", compact)
             or not re.search(r"[A-Za-z0-9\u3400-\u9fff]", compact)
@@ -307,9 +313,26 @@ class LocalDeepSeekVoiceProvider:
     def _pop_spoken_segments(buffer: str) -> tuple[list[str], str]:
         segments: list[str] = []
         start = 0
-        for match in re.finditer(r"[。！？!?；;]|(?<!\d)\.(?:\s|$)", buffer):
+        boundary = re.compile(
+            r"[。！？!?；;，,]|(?<!\d)\.(?:\s|$)"
+        )
+        for match in boundary.finditer(buffer):
             end = match.end()
             segment = buffer[start:end].strip()
+            is_soft_pause = match.group(0).strip() in {"，", ","}
+            if is_soft_pause:
+                chinese_chars = len(
+                    re.findall(r"[\u3400-\u9fff]", segment)
+                )
+                latin_words = len(
+                    re.findall(r"[A-Za-z0-9]+", segment)
+                )
+                if (
+                    chinese_chars < 12
+                    and latin_words < 8
+                    and len(segment) < 24
+                ):
+                    continue
             if segment:
                 segments.append(segment)
             start = end
@@ -620,6 +643,9 @@ class VoiceState:
     error: str | None = None
     audio_rms: int = 0
     audio_peak_rms: int = 0
+    device_vad_available: bool = False
+    device_vad_speaking: bool = False
+    suppressed_background_frames: int = 0
     latency_ms: dict[str, float] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -647,6 +673,11 @@ class VoiceState:
             "error": self.error,
             "audio_rms": self.audio_rms,
             "audio_peak_rms": self.audio_peak_rms,
+            "device_vad_available": self.device_vad_available,
+            "device_vad_speaking": self.device_vad_speaking,
+            "suppressed_background_frames": (
+                self.suppressed_background_frames
+            ),
             "latency_ms": self.latency_ms,
             "updated_at": self.updated_at,
         }
@@ -681,6 +712,8 @@ class VoiceSessionManager:
         self._silence_ms = 0
         self._noise_rms = 90.0
         self._ignore_audio_until = 0.0
+        self._device_vad_speech_until = 0.0
+        self._servo_noise_until = 0.0
         self._wake_deadline: float | None = None
         self._history: deque[dict[str, str]] = deque(maxlen=12)
         self._task: asyncio.Task[None] | None = None
@@ -742,6 +775,14 @@ class VoiceSessionManager:
     def is_capturing_speech(self) -> bool:
         return self._speaking_detected
 
+    def note_servo_motion(self, estimated_seconds: float) -> None:
+        """Mark deterministic mechanical-noise frames without muting speech."""
+        guard_seconds = self.settings.voice_servo_noise_guard_ms / 1000
+        self._servo_noise_until = max(
+            self._servo_noise_until,
+            time.monotonic() + max(0.0, estimated_seconds) + guard_seconds,
+        )
+
     def _ensure_codec(self) -> None:
         if self.codec is None:
             self.codec = OpusCodec()
@@ -787,6 +828,12 @@ class VoiceSessionManager:
             self.state.response_text = None
             self.state.audio_rms = 0
             self.state.audio_peak_rms = 0
+            # Treat VAD as authoritative only after the device has emitted an
+            # event. This keeps older firmware capable of falling back to the
+            # host energy detector instead of silently rejecting all speech.
+            self.state.device_vad_available = False
+            self.state.device_vad_speaking = False
+            self.state.suppressed_background_frames = 0
             self.state.latency_ms = {}
             self._clear_audio()
             if self.wake_detector is not None:
@@ -900,16 +947,46 @@ class VoiceSessionManager:
                 return
         if kws_only:
             return
-        self._pre_roll.append(pcm)
+        now = time.monotonic()
         rms = audioop.rms(pcm, 2)
         self.state.audio_rms = rms
         self.state.audio_peak_rms = max(self.state.audio_peak_rms, rms)
-        if not self._speaking_detected:
+        device_speech = (
+            self.state.device_vad_speaking
+            or now < self._device_vad_speech_until
+        )
+        device_vad_authoritative = (
+            self.settings.voice_device_vad_enabled
+            and self.state.device_vad_available
+        )
+        servo_noise_active = now < self._servo_noise_until
+        if servo_noise_active and not self._speaking_detected:
+            # Servo motion is a deterministic local noise source and can fool
+            # acoustic VAD. Do not let it start an utterance; speech already in
+            # progress is preserved and can continue through a small correction.
+            self.state.suppressed_background_frames += 1
+            return
+        self._pre_roll.append(pcm)
+        if (
+            not self._speaking_detected
+            and not servo_noise_active
+            and not device_speech
+        ):
             self._noise_rms = max(20.0, self._noise_rms * 0.96 + rms * 0.04)
         start_threshold = min(1100, max(280, round(self._noise_rms * 3.0)))
         continue_threshold = min(700, max(170, round(self._noise_rms * 1.7)))
         speech_threshold = continue_threshold if self._speaking_detected else start_threshold
-        if rms >= speech_threshold:
+        speech_frame = rms >= speech_threshold and (
+            not device_vad_authoritative or device_speech
+        )
+        if (
+            self._speaking_detected
+            and device_vad_authoritative
+            and self.state.device_vad_speaking
+            and rms >= 120
+        ):
+            speech_frame = True
+        if speech_frame:
             if not self._speaking_detected:
                 self._utterance.extend(self._pre_roll)
                 self._speaking_detected = True
@@ -921,8 +998,10 @@ class VoiceSessionManager:
             self._silence_ms += 60
             duration_ms = len(self._utterance) * 60
             required_silence_ms = (
-                max(720, self.settings.voice_silence_ms)
-                if duration_ms < 900
+                360
+                if device_vad_authoritative and not device_speech
+                else max(480, self.settings.voice_silence_ms)
+                if duration_ms < 720
                 else self.settings.voice_silence_ms
             )
             if self._silence_ms >= required_silence_ms:
@@ -931,10 +1010,13 @@ class VoiceSessionManager:
             self._finish_utterance()
 
     async def voice_activity(self, speaking: bool) -> None:
-        # The CoreS3 WebRTC VAD can end a phrase between Chinese syllables.
-        # Host-side energy VAD owns phrase boundaries; the device event remains
-        # protocol-compatible telemetry only until acoustic echo cancellation lands.
-        return
+        self.state.device_vad_available = True
+        self.state.device_vad_speaking = speaking
+        if speaking:
+            self._device_vad_speech_until = (
+                time.monotonic()
+                + self.settings.voice_device_vad_hangover_ms / 1000
+            )
 
     async def submit_text(self, transcript: str) -> dict[str, object]:
         self._ensure_codec()
@@ -1101,8 +1183,9 @@ class VoiceSessionManager:
             await asyncio.sleep(0.24)
             if self.state.enabled and await self.gateway.is_online():
                 self._clear_audio()
+                await self._wait_for_servo_quiet(max_wait_seconds=0.45)
                 await self.gateway.send(MessageType.START_AUDIO_STREAM)
-                self._ignore_audio_until = time.monotonic() + 1.2
+                self._ignore_audio_until = time.monotonic() + 0.35
                 microphone_paused = False
             if sleep_after_reply:
                 self.state.awake = False
@@ -1142,8 +1225,9 @@ class VoiceSessionManager:
             if microphone_paused and self.state.enabled and await self.gateway.is_online():
                 self._clear_audio()
                 try:
+                    await self._wait_for_servo_quiet(max_wait_seconds=0.45)
                     await self.gateway.send(MessageType.START_AUDIO_STREAM)
-                    self._ignore_audio_until = time.monotonic() + 1.2
+                    self._ignore_audio_until = time.monotonic() + 0.35
                 except DeviceOfflineError:
                     pass
 
@@ -1328,6 +1412,11 @@ class VoiceSessionManager:
             1,
         )
 
+    async def _wait_for_servo_quiet(self, *, max_wait_seconds: float) -> None:
+        remaining = self._servo_noise_until - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(min(max_wait_seconds, remaining))
+
     def _load_wake_ack_pcm(self) -> bytes | None:
         path = self.settings.voice_wake_ack_pcm
         if not path.is_file():
@@ -1392,12 +1481,19 @@ class VoiceSessionManager:
         await asyncio.sleep(0.12)
         if wake_task is not None and not wake_task.done():
             try:
-                await asyncio.wait_for(asyncio.shield(wake_task), timeout=0.8)
+                await asyncio.wait_for(
+                    asyncio.shield(wake_task),
+                    timeout=(
+                        self.settings.presence_wake_search_budget_seconds
+                        + 0.15
+                    ),
+                )
             except asyncio.TimeoutError:
                 pass
+        await self._wait_for_servo_quiet(max_wait_seconds=0.45)
         await self.gateway.send(MessageType.START_AUDIO_STREAM)
         self._clear_audio()
-        self._ignore_audio_until = time.monotonic() + 0.35
+        self._ignore_audio_until = time.monotonic() + 0.18
         self._activate_wake_session()
         self._set_mode(self._idle_mode())
         await self._show_avatar("listening")
