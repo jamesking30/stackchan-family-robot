@@ -70,6 +70,8 @@ def main() -> int:
         "voice_ready": False,
         "wake_word_ready": False,
         "voice_mode": "unknown",
+        "deployment_path_valid": False,
+        "missing_paths": [],
         "problems": [],
     }
     problems = result["problems"]
@@ -80,6 +82,10 @@ def main() -> int:
         result["control_service"] = bool(health.get("ok"))
         result["voice_ready"] = bool(health.get("voice_ready"))
         result["wake_word_ready"] = bool(health.get("wake_word_ready"))
+        result["deployment_path_valid"] = bool(
+            health.get("deployment_path_valid")
+        )
+        result["missing_paths"] = health.get("missing_paths", [])
         state = request_json("/v1/device/state", admin=True)
         result["robot_online"] = bool(state.get("online"))
         voice_state = request_json("/v1/voice/state", admin=True)
@@ -111,6 +117,8 @@ def main() -> int:
         problems.append("voice session is not ready")
     if not result["wake_word_ready"]:
         problems.append("wake-word detector is not ready")
+    if not result["deployment_path_valid"]:
+        problems.append("deployment path or runtime assets are missing")
 
     output = ROOT / "var/health/latest.json"
     output.parent.mkdir(parents=True, exist_ok=True)

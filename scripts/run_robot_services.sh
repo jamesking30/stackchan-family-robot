@@ -15,6 +15,26 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+mkdir -p "$ROOT_DIR/var/logs" "$ROOT_DIR/var/health"
+
+required_files=(
+  "$ROOT_DIR/.env"
+  "$ROOT_DIR/.venv/bin/stackchan-control"
+  "$ROOT_DIR/var/models/ggml-small.bin"
+  "$ROOT_DIR/config/seed_character/manifest.yaml"
+)
+for required_file in "${required_files[@]}"; do
+  if [[ ! -s "$required_file" ]]; then
+    echo "Required runtime file is missing: $required_file" >&2
+    exit 1
+  fi
+done
+
+if [[ ! -x /opt/homebrew/bin/whisper-server ]]; then
+  echo "Whisper server is missing: /opt/homebrew/bin/whisper-server" >&2
+  exit 1
+fi
+
 start_qwen() {
   if curl --fail --silent --max-time 1 http://127.0.0.1:8766/v1/models >/dev/null 2>&1; then
     TTS_PID=""

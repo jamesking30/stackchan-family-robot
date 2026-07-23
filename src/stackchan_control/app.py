@@ -47,7 +47,7 @@ from .schemas import (
     VoiceStateResponse,
     VoiceTextTurn,
 )
-from .settings import Settings
+from .settings import PROJECT_ROOT, Settings
 from .voice import (
     OpusCodec,
     VoiceError,
@@ -200,24 +200,44 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, object]:
         voice_ready = voice.state.enabled and voice.state.mode != VoiceMode.ERROR
+        required_paths = {
+            "project_root": PROJECT_ROOT,
+            "seed_character_dir": current_settings.seed_character_dir,
+            "web_dir": current_settings.web_dir,
+            "database_parent": current_settings.db_path.parent,
+            "whisper_model": current_settings.voice_whisper_model,
+        }
+        if current_settings.voice_kws_enabled:
+            required_paths["wake_word_model"] = current_settings.voice_kws_model_dir
+            required_paths["wake_word_keywords"] = (
+                current_settings.voice_kws_keywords_file
+            )
+        missing_paths = [
+            name for name, path in required_paths.items() if not path.exists()
+        ]
+        voice_configured = bool(
+            current_settings.deepseek_api_key
+            and current_settings.voice_whisper_model.is_file()
+        )
+        wake_word_ready = bool(
+            voice_ready
+            and (
+                not current_settings.voice_kws_enabled
+                or voice.wake_detector is not None
+            )
+        )
+        healthy = not missing_paths and voice_configured and wake_word_ready
         return {
-            "ok": True,
+            "ok": healthy,
             "service": "stackchan-control",
             "version": "0.3.0",
             "local_first": True,
+            "deployment_path_valid": not missing_paths,
+            "missing_paths": missing_paths,
             "device_gateway_auth_configured": bool(current_settings.device_api_key),
-            "voice_configured": bool(
-                current_settings.deepseek_api_key
-                and current_settings.voice_whisper_model.is_file()
-            ),
+            "voice_configured": voice_configured,
             "voice_ready": voice_ready,
-            "wake_word_ready": bool(
-                voice_ready
-                and (
-                    not current_settings.voice_kws_enabled
-                    or voice.wake_detector is not None
-                )
-            ),
+            "wake_word_ready": wake_word_ready,
         }
 
     @app.websocket("/stackChan/ws")
