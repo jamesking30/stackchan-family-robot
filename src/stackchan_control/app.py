@@ -27,6 +27,7 @@ from .gateway import (
     StackChanGateway,
     unpack_frame,
 )
+from .presence import PresenceTracker
 from .repository import ConflictError, NotFoundError, RepositoryError, RobotRepository
 from .schemas import (
     CharacterVersion,
@@ -35,6 +36,7 @@ from .schemas import (
     DisplayState,
     MemoryCreate,
     MemoryItem,
+    PresenceStateResponse,
     PromptPreview,
     RobotAvatarCommand,
     RobotExpressionCommand,
@@ -124,6 +126,11 @@ def create_app(
         wake_detector=wake_detector,
         avatar_controller=avatar if current_settings.avatar_voice_enabled else None,
     )
+    presence = PresenceTracker(
+        current_settings,
+        gateway,
+        voice_mode=lambda: voice.state.mode.value,
+    )
 
     app = FastAPI(
         title="StackChan Family Robot Control API",
@@ -135,6 +142,7 @@ def create_app(
     app.state.gateway = gateway
     app.state.avatar = avatar
     app.state.voice = voice
+    app.state.presence = presence
 
     async def sync_display_to_device() -> None:
         display = repository.display_state()
@@ -221,6 +229,10 @@ def create_app(
             required_paths["wake_word_keywords"] = (
                 current_settings.voice_kws_keywords_file
             )
+        if current_settings.presence_enabled:
+            required_paths["presence_face_model"] = (
+                current_settings.presence_face_model
+            )
         missing_paths = [
             name for name, path in required_paths.items() if not path.exists()
         ]
@@ -247,6 +259,11 @@ def create_app(
             "voice_configured": voice_configured,
             "voice_ready": voice_ready,
             "wake_word_ready": wake_word_ready,
+            "presence_enabled": current_settings.presence_enabled,
+            "presence_ready": (
+                not current_settings.presence_enabled
+                or presence.mode != "error"
+            ),
         }
 
     @app.websocket("/stackChan/ws")
@@ -270,6 +287,7 @@ def create_app(
         await websocket.accept()
         session = await gateway.register(device_id, websocket)
         await voice.on_device_connected()
+        await presence.on_device_connected()
         last_ping_monotonic = time.monotonic()
         try:
             while True:
@@ -321,6 +339,7 @@ def create_app(
         except (WebSocketDisconnect, DeviceOfflineError, asyncio.CancelledError):
             pass
         finally:
+            await presence.on_device_disconnected()
             await gateway.disconnect(session)
             await voice.on_device_disconnected()
 
@@ -361,12 +380,29 @@ def create_app(
     async def device_state() -> dict[str, object]:
         return await gateway.snapshot()
 
+    @app.get(
+        "/v1/presence/state",
+        response_model=PresenceStateResponse,
+        dependencies=[Depends(require_admin)],
+    )
+    def presence_state() -> dict[str, object]:
+        return presence.snapshot()
+
+    @app.post(
+        "/v1/presence/scan",
+        response_model=PresenceStateResponse,
+        dependencies=[Depends(require_admin)],
+    )
+    async def presence_scan() -> dict[str, object]:
+        return await presence.scan_now(force=True)
+
     @app.post(
         "/v1/device/motion",
         response_model=DeviceState,
         dependencies=[Depends(require_admin)],
     )
     async def device_motion(body: RobotMotionCommand) -> dict[str, object]:
+        presence.note_manual_override(body.yaw_degrees, body.pitch_degrees)
         await gateway.send_json(
             MessageType.CONTROL_MOTION,
             {

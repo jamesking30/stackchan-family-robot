@@ -90,6 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
     voice_commands.add_parser("interrupt")
     voice_turn = voice_commands.add_parser("say")
     voice_turn.add_argument("transcript")
+
+    presence = commands.add_parser("presence")
+    presence_commands = presence.add_subparsers(
+        dest="presence_command", required=True
+    )
+    presence_commands.add_parser("state")
+    presence_commands.add_parser("scan")
     return parser
 
 
@@ -155,6 +162,10 @@ def main() -> None:
                 timeout=120,
             )
         )
+    elif args.command == "presence" and args.presence_command == "state":
+        print_json(request("GET", "/v1/presence/state"))
+    elif args.command == "presence" and args.presence_command == "scan":
+        print_json(request("POST", "/v1/presence/scan", timeout=60))
     else:
         sys.exit(2)
 

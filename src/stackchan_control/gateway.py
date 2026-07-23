@@ -92,6 +92,7 @@ class StackChanGateway:
         self.default_device_id = default_device_id
         self._sessions: dict[str, DeviceSession] = {}
         self._lock = asyncio.Lock()
+        self._camera_frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2)
 
     async def register(self, device_id: str, websocket: WebSocket) -> DeviceSession:
         session = DeviceSession(device_id=device_id, websocket=websocket)
@@ -119,8 +120,19 @@ class StackChanGateway:
         session.last_seen = datetime.now(timezone.utc)
         session.frames_received += 1
         session.last_message_type = frame.message_type
+        if frame.message_type == MessageType.JPEG:
+            if self._camera_frames.full():
+                self._camera_frames.get_nowait()
+            self._camera_frames.put_nowait(frame.payload)
         if frame.message_type == MessageType.HEARTBEAT_PONG:
             session.last_pong_monotonic = time.monotonic()
+
+    def clear_camera_frames(self) -> None:
+        while not self._camera_frames.empty():
+            self._camera_frames.get_nowait()
+
+    async def next_camera_frame(self, timeout: float) -> bytes:
+        return await asyncio.wait_for(self._camera_frames.get(), timeout=timeout)
 
     async def send(
         self,

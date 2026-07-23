@@ -26,6 +26,39 @@ class Settings:
     avatar_idle_animation_enabled: bool = True
     avatar_idle_min_seconds: float = 4.5
     avatar_idle_max_seconds: float = 9.5
+    presence_enabled: bool = False
+    presence_face_model: Path = (
+        PROJECT_ROOT / "var/models/mediapipe/blaze_face_short_range.tflite"
+    )
+    presence_min_confidence: float = 0.55
+    presence_start_delay_seconds: float = 5.0
+    presence_scan_interval_seconds: float = 300.0
+    presence_tracking_interval_seconds: float = 5.0
+    presence_servo_settle_seconds: float = 0.55
+    presence_frame_timeout_seconds: float = 1.0
+    presence_frames_per_pose: int = 2
+    presence_scan_yaw_degrees: tuple[float, ...] = (
+        -40.0,
+        -20.0,
+        0.0,
+        20.0,
+        40.0,
+    )
+    presence_scan_pitch_degrees: tuple[float, ...] = (5.0, 20.0, 35.0)
+    presence_pitch_degrees: float = 10.0
+    presence_servo_speed: int = 120
+    presence_camera_horizontal_fov: float = 60.0
+    presence_camera_vertical_fov: float = 45.0
+    presence_yaw_direction: float = 1.0
+    presence_pitch_direction: float = 1.0
+    presence_center_deadband: float = 0.06
+    presence_vertical_center: float = 0.45
+    presence_vertical_deadband: float = 0.08
+    presence_max_step_degrees: float = 5.0
+    presence_max_pitch_step_degrees: float = 4.0
+    presence_target_switch_ratio: float = 1.25
+    presence_target_lost_seconds: float = 30.0
+    presence_manual_override_seconds: float = 60.0
     admin_api_key: str | None = None
     device_api_key: str | None = None
     device_id: str = "stackchan-home-01"
@@ -119,6 +152,95 @@ class Settings:
             ),
             avatar_idle_max_seconds=float(
                 os.getenv("ROBOT_AVATAR_IDLE_MAX_SECONDS", "9.5")
+            ),
+            presence_enabled=os.getenv(
+                "ROBOT_PRESENCE_ENABLED", "true"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            presence_face_model=project_path(
+                os.getenv(
+                    "ROBOT_PRESENCE_FACE_MODEL",
+                    "var/models/mediapipe/blaze_face_short_range.tflite",
+                )
+            ),
+            presence_min_confidence=float(
+                os.getenv("ROBOT_PRESENCE_MIN_CONFIDENCE", "0.55")
+            ),
+            presence_start_delay_seconds=float(
+                os.getenv("ROBOT_PRESENCE_START_DELAY_SECONDS", "5")
+            ),
+            presence_scan_interval_seconds=float(
+                os.getenv("ROBOT_PRESENCE_SCAN_INTERVAL_SECONDS", "300")
+            ),
+            presence_tracking_interval_seconds=float(
+                os.getenv("ROBOT_PRESENCE_TRACKING_INTERVAL_SECONDS", "5")
+            ),
+            presence_servo_settle_seconds=float(
+                os.getenv("ROBOT_PRESENCE_SERVO_SETTLE_SECONDS", "0.55")
+            ),
+            presence_frame_timeout_seconds=float(
+                os.getenv("ROBOT_PRESENCE_FRAME_TIMEOUT_SECONDS", "1")
+            ),
+            presence_frames_per_pose=int(
+                os.getenv("ROBOT_PRESENCE_FRAMES_PER_POSE", "2")
+            ),
+            presence_scan_yaw_degrees=tuple(
+                float(item.strip())
+                for item in os.getenv(
+                    "ROBOT_PRESENCE_SCAN_YAW_DEGREES",
+                    "-40,-20,0,20,40",
+                ).split(",")
+                if item.strip()
+            ),
+            presence_scan_pitch_degrees=tuple(
+                float(item.strip())
+                for item in os.getenv(
+                    "ROBOT_PRESENCE_SCAN_PITCH_DEGREES",
+                    "5,20,35",
+                ).split(",")
+                if item.strip()
+            ),
+            presence_pitch_degrees=float(
+                os.getenv("ROBOT_PRESENCE_PITCH_DEGREES", "10")
+            ),
+            presence_servo_speed=int(
+                os.getenv("ROBOT_PRESENCE_SERVO_SPEED", "120")
+            ),
+            presence_camera_horizontal_fov=float(
+                os.getenv("ROBOT_PRESENCE_CAMERA_HORIZONTAL_FOV", "60")
+            ),
+            presence_camera_vertical_fov=float(
+                os.getenv("ROBOT_PRESENCE_CAMERA_VERTICAL_FOV", "45")
+            ),
+            presence_yaw_direction=float(
+                os.getenv("ROBOT_PRESENCE_YAW_DIRECTION", "1")
+            ),
+            presence_pitch_direction=float(
+                os.getenv("ROBOT_PRESENCE_PITCH_DIRECTION", "1")
+            ),
+            presence_center_deadband=float(
+                os.getenv("ROBOT_PRESENCE_CENTER_DEADBAND", "0.06")
+            ),
+            presence_vertical_center=float(
+                os.getenv("ROBOT_PRESENCE_VERTICAL_CENTER", "0.45")
+            ),
+            presence_vertical_deadband=float(
+                os.getenv("ROBOT_PRESENCE_VERTICAL_DEADBAND", "0.08")
+            ),
+            presence_max_step_degrees=float(
+                os.getenv("ROBOT_PRESENCE_MAX_STEP_DEGREES", "5")
+            ),
+            presence_max_pitch_step_degrees=float(
+                os.getenv("ROBOT_PRESENCE_MAX_PITCH_STEP_DEGREES", "4")
+            ),
+            presence_target_switch_ratio=float(
+                os.getenv("ROBOT_PRESENCE_TARGET_SWITCH_RATIO", "1.25")
+            ),
+            presence_target_lost_seconds=float(
+                os.getenv("ROBOT_PRESENCE_TARGET_LOST_SECONDS", "30")
+            ),
+            presence_manual_override_seconds=float(
+                os.getenv("ROBOT_PRESENCE_MANUAL_OVERRIDE_SECONDS", "60")
             ),
             admin_api_key=os.getenv("ROBOT_ADMIN_API_KEY") or None,
             device_api_key=os.getenv("ROBOT_DEVICE_API_KEY") or None,

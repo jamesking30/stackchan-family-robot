@@ -128,6 +128,26 @@ class DeviceState(BaseModel):
     last_message_type: int | None = None
 
 
+class PresenceStateResponse(BaseModel):
+    enabled: bool
+    mode: str
+    faces_detected: int
+    target_yaw: float | None = None
+    target_pitch: float | None = None
+    target_center_x: float | None = None
+    target_center_y: float | None = None
+    target_area: float | None = None
+    target_scan_yaw: float | None = None
+    target_scan_pitch: float | None = None
+    current_yaw: float
+    current_pitch: float
+    last_scan_at: datetime | None = None
+    target_seen_at: datetime | None = None
+    manual_override_seconds: float
+    camera_frames_persisted: bool
+    error: str | None = None
+
+
 class RobotMotionCommand(BaseModel):
     yaw_degrees: float = Field(ge=-45, le=45)
     pitch_degrees: float = Field(ge=0, le=45)
