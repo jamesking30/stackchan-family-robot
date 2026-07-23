@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -113,10 +114,12 @@ class PresenceTracker:
         voice_mode: Callable[[], str],
         detector: FaceDetector | None = None,
         age_classifier: FaceAgeClassifier | None = None,
+        voice_is_speaking: Callable[[], bool] | None = None,
     ) -> None:
         self.settings = settings
         self.gateway = gateway
         self.voice_mode = voice_mode
+        self.voice_is_speaking = voice_is_speaking or (lambda: False)
         self._detector = detector
         self._age_classifier = age_classifier
         self._age_classifier_attempted = age_classifier is not None
@@ -221,6 +224,7 @@ class PresenceTracker:
             while self.voice_mode() not in {
                 "listening",
                 "waiting_for_wake_word",
+                "speaking",
                 "stopped",
             }:
                 if time.monotonic() >= deadline:
@@ -240,12 +244,12 @@ class PresenceTracker:
         if not self.enabled:
             return self.snapshot()
         self._ensure_detector()
-        if not force and not self._can_move():
+        if not force and not self._can_full_scan():
             self.mode = "deferred"
             return self.snapshot()
         async with self._operation_lock:
             if not force and (
-                not self._can_move()
+                not self._can_full_scan()
                 or time.monotonic() < self._next_full_scan
             ):
                 return self.snapshot()
@@ -256,13 +260,17 @@ class PresenceTracker:
         try:
             while self.enabled and await self.gateway.is_online():
                 now = time.monotonic()
-                if self._can_move():
-                    if now >= self._next_full_scan:
-                        await self.scan_now()
-                    elif self.target_yaw is not None:
-                        async with self._operation_lock:
-                            await self._track_target()
-                await asyncio.sleep(self.settings.presence_tracking_interval_seconds)
+                if self._can_full_scan() and now >= self._next_full_scan:
+                    await self.scan_now()
+                elif self.target_yaw is not None and self._can_track():
+                    async with self._operation_lock:
+                        await self._track_target()
+                interval = (
+                    self.settings.presence_active_tracking_interval_seconds
+                    if self.voice_mode() == "listening"
+                    else self.settings.presence_tracking_interval_seconds
+                )
+                await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
         except DeviceOfflineError:
@@ -272,9 +280,17 @@ class PresenceTracker:
             self.mode = "error"
             self.last_error = str(exc)[:240]
 
-    def _can_move(self) -> bool:
+    def _can_full_scan(self) -> bool:
         return (
             self.voice_mode() in {"waiting_for_wake_word", "stopped"}
+            and time.monotonic() >= self._manual_override_until
+        )
+
+    def _can_track(self) -> bool:
+        return (
+            self.voice_mode()
+            in {"waiting_for_wake_word", "listening", "stopped"}
+            and not self.voice_is_speaking()
             and time.monotonic() >= self._manual_override_until
         )
 
@@ -316,14 +332,14 @@ class PresenceTracker:
                 if yaw_index % 2:
                     pitches = tuple(reversed(pitches))
                 for pitch in pitches:
-                    if not force and not self._can_move():
+                    if not force and not self._can_full_scan():
                         aborted = True
                         break
                     await self._move(yaw, pitch)
                     await asyncio.sleep(
                         self.settings.presence_servo_settle_seconds
                     )
-                    if not force and not self._can_move():
+                    if not force and not self._can_full_scan():
                         aborted = True
                         break
                     self.gateway.clear_camera_frames()
@@ -392,7 +408,7 @@ class PresenceTracker:
         assert self._detector is not None
         for frame in frames:
             detections.extend(self._detector.detect(frame))
-        if not self._can_move():
+        if not self._can_track():
             self.mode = (
                 "manual_override"
                 if time.monotonic() < self._manual_override_until
@@ -456,23 +472,58 @@ class PresenceTracker:
     async def _quick_reacquire(
         self, voice_evidence: ChildVoiceEvidence | None = None
     ) -> WakeIdentityEvidence | None:
-        self.mode = "wake_reacquire"
+        self.mode = "wake_searching"
         self.last_error = None
+        starting_yaw = self._current_yaw
+        starting_pitch = self._current_pitch
+        search_poses = [(starting_yaw, starting_pitch)]
+        search_poses.extend(
+            (
+                max(-45.0, min(45.0, starting_yaw + offset)),
+                starting_pitch,
+            )
+            for offset in self.settings.presence_wake_search_yaw_offsets
+        )
+        search_poses.extend(
+            (
+                starting_yaw,
+                max(0.0, min(45.0, starting_pitch + offset)),
+            )
+            for offset in self.settings.presence_wake_search_pitch_offsets
+        )
+        detected_frames: list[
+            tuple[FaceDetection, bytes, float, float]
+        ] = []
         await self.gateway.send(MessageType.START_CAMERA_STREAM)
         try:
-            await asyncio.sleep(0.08)
-            self.gateway.clear_camera_frames()
-            frames = await self._collect_frames()
+            for pose_index, (yaw, pitch) in enumerate(search_poses):
+                if pose_index:
+                    if self.voice_is_speaking():
+                        break
+                    await self._move(yaw, pitch)
+                    await asyncio.sleep(
+                        self.settings.presence_wake_search_settle_seconds
+                    )
+                else:
+                    await asyncio.sleep(0.06)
+                self.gateway.clear_camera_frames()
+                frames = await self._collect_frames(
+                    frame_limit=1,
+                    timeout_seconds=(
+                        self.settings.presence_wake_search_frame_timeout_seconds
+                    ),
+                )
+                assert self._detector is not None
+                for frame in frames:
+                    detected_frames.extend(
+                        (detection, frame, yaw, pitch)
+                        for detection in self._detector.detect(frame)
+                    )
+                if detected_frames:
+                    break
         finally:
             await self.gateway.send(MessageType.STOP_CAMERA_STREAM)
 
-        detected_frames: list[tuple[FaceDetection, bytes]] = []
-        assert self._detector is not None
-        for frame in frames:
-            detected_frames.extend(
-                (detection, frame)
-                for detection in self._detector.detect(frame)
-            )
         detections = [item[0] for item in detected_frames]
         self.last_wake_reacquire_at = datetime.now(timezone.utc)
         self.last_wake_reacquire_found = bool(detections)
@@ -483,19 +534,20 @@ class PresenceTracker:
             self.last_child_face = None
             self.last_estimated_age = None
             self.last_child_identity_confidence = None
+            await self._smooth_move(starting_yaw, starting_pitch)
             if voice_evidence is None:
                 return None
             return WakeIdentityEvidence(voice_evidence, None)
 
         best = self._select_tracking_face(detections)
+        best_frame, scan_yaw, scan_pitch = next(
+            (frame, yaw, pitch)
+            for detection, frame, yaw, pitch in detected_frames
+            if detection is best
+        )
         face_evidence: ChildFaceEvidence | None = None
         age_classifier = self._ensure_age_classifier()
         if age_classifier is not None and voice_evidence is not None:
-            best_frame = next(
-                frame
-                for detection, frame in detected_frames
-                if detection is best
-            )
             try:
                 face_evidence = age_classifier.classify(
                     best_frame,
@@ -520,31 +572,14 @@ class PresenceTracker:
         self.last_child_identity_confidence = (
             combined.confidence if combined is not None else None
         )
-        target_yaw = self._yaw_for_detection(self._current_yaw, best)
-        target_pitch = self._pitch_for_detection(self._current_pitch, best)
-        yaw_step = max(
-            -self.settings.presence_max_step_degrees,
-            min(
-                self.settings.presence_max_step_degrees,
-                target_yaw - self._current_yaw,
-            ),
-        )
-        pitch_step = max(
-            -self.settings.presence_max_pitch_step_degrees,
-            min(
-                self.settings.presence_max_pitch_step_degrees,
-                target_pitch - self._current_pitch,
-            ),
-        )
-        await self._move(
-            self._current_yaw + yaw_step,
-            self._current_pitch + pitch_step,
-        )
+        target_yaw = self._yaw_for_detection(scan_yaw, best)
+        target_pitch = self._pitch_for_detection(scan_pitch, best)
+        await self._smooth_move(target_yaw, target_pitch)
         self.target_yaw = self._current_yaw
         self.target_pitch = self._current_pitch
         self._target_score = best.area * best.confidence
         self._target_seen_at = datetime.now(timezone.utc)
-        self._record_target(best, self._current_yaw, self._current_pitch)
+        self._record_target(best, scan_yaw, scan_pitch)
         self.mode = "wake_tracking"
         return combined
 
@@ -596,10 +631,21 @@ class PresenceTracker:
         self.target_scan_yaw = None
         self.target_scan_pitch = None
 
-    async def _collect_frames(self) -> list[bytes]:
+    async def _collect_frames(
+        self,
+        *,
+        frame_limit: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> list[bytes]:
         frames: list[bytes] = []
-        deadline = time.monotonic() + self.settings.presence_frame_timeout_seconds
-        while len(frames) < self.settings.presence_frames_per_pose:
+        limit = frame_limit or self.settings.presence_frames_per_pose
+        timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self.settings.presence_frame_timeout_seconds
+        )
+        deadline = time.monotonic() + timeout
+        while len(frames) < limit:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -608,6 +654,23 @@ class PresenceTracker:
             except asyncio.TimeoutError:
                 break
         return frames
+
+    async def _smooth_move(self, yaw: float, pitch: float) -> None:
+        start_yaw = self._current_yaw
+        start_pitch = self._current_pitch
+        distance = max(abs(yaw - start_yaw), abs(pitch - start_pitch))
+        step_size = max(1.0, self.settings.presence_wake_smooth_step_degrees)
+        steps = max(1, math.ceil(distance / step_size))
+        for step in range(1, steps + 1):
+            fraction = step / steps
+            await self._move(
+                start_yaw + (yaw - start_yaw) * fraction,
+                start_pitch + (pitch - start_pitch) * fraction,
+            )
+            if step < steps:
+                await asyncio.sleep(
+                    self.settings.presence_wake_smooth_step_seconds
+                )
 
     async def _move(self, yaw: float, pitch: float | None = None) -> None:
         yaw = max(-45.0, min(45.0, yaw))

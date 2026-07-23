@@ -606,6 +606,7 @@ class VoiceState:
     awake: bool = False
     last_wake_keyword: str | None = None
     wake_detected_at: datetime | None = None
+    wake_detection_count: int = 0
     last_wake_child_voice: bool | None = None
     last_wake_pitch_hz: float | None = None
     last_wake_voiced_ratio: float | None = None
@@ -632,6 +633,7 @@ class VoiceState:
             "awake": self.awake,
             "last_wake_keyword": self.last_wake_keyword,
             "wake_detected_at": self.wake_detected_at,
+            "wake_detection_count": self.wake_detection_count,
             "last_wake_child_voice": self.last_wake_child_voice,
             "last_wake_pitch_hz": self.last_wake_pitch_hz,
             "last_wake_voiced_ratio": self.last_wake_voiced_ratio,
@@ -698,9 +700,12 @@ class VoiceSessionManager:
     ) -> None:
         self._wake_callback = callback
 
-    def _schedule_wake_callback(self, evidence: ChildVoiceEvidence) -> None:
+    def _schedule_wake_callback(
+        self, evidence: ChildVoiceEvidence
+    ) -> asyncio.Task[None] | None:
         if self._wake_callback is not None:
-            asyncio.create_task(self._run_wake_callback(evidence))
+            return asyncio.create_task(self._run_wake_callback(evidence))
+        return None
 
     async def _run_wake_callback(self, evidence: ChildVoiceEvidence) -> None:
         assert self._wake_callback is not None
@@ -732,6 +737,10 @@ class VoiceSessionManager:
         self.state.speaker_identity_confidence = None
         self.state.speaker_identity_reason = None
         self.state.speaker_identity_at = None
+
+    @property
+    def is_capturing_speech(self) -> bool:
+        return self._speaking_detected
 
     def _ensure_codec(self) -> None:
         if self.codec is None:
@@ -848,8 +857,14 @@ class VoiceSessionManager:
         if not self.state.enabled or self.state.mode not in {
             VoiceMode.LISTENING,
             VoiceMode.WAITING_FOR_WAKE_WORD,
+            VoiceMode.TRANSCRIBING,
+            VoiceMode.THINKING,
         }:
             return
+        kws_only = self.state.mode in {
+            VoiceMode.TRANSCRIBING,
+            VoiceMode.THINKING,
+        }
         self._expire_wake_session()
         if time.monotonic() < self._ignore_audio_until:
             return
@@ -857,12 +872,21 @@ class VoiceSessionManager:
         assert self.codec is not None
         pcm = self.codec.decode_microphone(payload)
         self._wake_audio.append(pcm)
-        if not self.state.awake and self.wake_detector is not None:
+        if self.wake_detector is not None:
             keyword = self.wake_detector.accept_pcm(pcm)
             if keyword:
+                if self._task is not None and not self._task.done():
+                    task = self._task
+                    self._task = None
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
                 self._activate_wake_session()
                 self.state.last_wake_keyword = keyword
                 self.state.wake_detected_at = datetime.now(timezone.utc)
+                self.state.wake_detection_count += 1
                 self.state.latency_ms = {
                     "kws_frame": self.wake_detector.last_frame_latency_ms
                 }
@@ -874,6 +898,8 @@ class VoiceSessionManager:
                 evidence = self._classify_wake_audio()
                 await self._acknowledge_wake_word(evidence)
                 return
+        if kws_only:
+            return
         self._pre_roll.append(pcm)
         rms = audioop.rms(pcm, 2)
         self.state.audio_rms = rms
@@ -1334,6 +1360,7 @@ class VoiceSessionManager:
         await self._show_avatar("listening")
         self._clear_audio()
         await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
+        wake_task = self._schedule_wake_callback(evidence)
         await self.gateway.send_json(
             MessageType.TEXT_MESSAGE,
             {"name": "爱莉", "content": "我在，你说吧。"},
@@ -1363,13 +1390,17 @@ class VoiceSessionManager:
                 await asyncio.sleep(OpusCodec.SPEECH_FRAME_DURATION_MS / 1000)
             await self._show_speaking_frame(0)
         await asyncio.sleep(0.12)
+        if wake_task is not None and not wake_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(wake_task), timeout=0.8)
+            except asyncio.TimeoutError:
+                pass
         await self.gateway.send(MessageType.START_AUDIO_STREAM)
         self._clear_audio()
         self._ignore_audio_until = time.monotonic() + 0.35
         self._activate_wake_session()
         self._set_mode(self._idle_mode())
         await self._show_avatar("listening")
-        self._schedule_wake_callback(evidence)
 
     def _classify_wake_audio(self) -> ChildVoiceEvidence:
         pcm = b"".join(self._wake_audio)

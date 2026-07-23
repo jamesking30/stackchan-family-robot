@@ -34,6 +34,7 @@ class Settings:
     presence_start_delay_seconds: float = 5.0
     presence_scan_interval_seconds: float = 300.0
     presence_tracking_interval_seconds: float = 5.0
+    presence_active_tracking_interval_seconds: float = 2.0
     presence_servo_settle_seconds: float = 0.55
     presence_frame_timeout_seconds: float = 1.0
     presence_frames_per_pose: int = 2
@@ -56,6 +57,17 @@ class Settings:
     presence_vertical_deadband: float = 0.08
     presence_max_step_degrees: float = 5.0
     presence_max_pitch_step_degrees: float = 4.0
+    presence_wake_search_yaw_offsets: tuple[float, ...] = (
+        -18.0,
+        18.0,
+        -32.0,
+        32.0,
+    )
+    presence_wake_search_pitch_offsets: tuple[float, ...] = (-10.0, 10.0)
+    presence_wake_search_settle_seconds: float = 0.16
+    presence_wake_search_frame_timeout_seconds: float = 0.28
+    presence_wake_smooth_step_degrees: float = 6.0
+    presence_wake_smooth_step_seconds: float = 0.06
     presence_target_switch_ratio: float = 1.25
     presence_target_lost_seconds: float = 30.0
     presence_manual_override_seconds: float = 60.0
@@ -183,6 +195,11 @@ class Settings:
             presence_tracking_interval_seconds=float(
                 os.getenv("ROBOT_PRESENCE_TRACKING_INTERVAL_SECONDS", "5")
             ),
+            presence_active_tracking_interval_seconds=float(
+                os.getenv(
+                    "ROBOT_PRESENCE_ACTIVE_TRACKING_INTERVAL_SECONDS", "2"
+                )
+            ),
             presence_servo_settle_seconds=float(
                 os.getenv("ROBOT_PRESENCE_SERVO_SETTLE_SECONDS", "0.55")
             ),
@@ -240,6 +257,42 @@ class Settings:
             ),
             presence_max_pitch_step_degrees=float(
                 os.getenv("ROBOT_PRESENCE_MAX_PITCH_STEP_DEGREES", "4")
+            ),
+            presence_wake_search_yaw_offsets=tuple(
+                float(item.strip())
+                for item in os.getenv(
+                    "ROBOT_PRESENCE_WAKE_SEARCH_YAW_OFFSETS",
+                    "-18,18,-32,32",
+                ).split(",")
+                if item.strip()
+            ),
+            presence_wake_search_pitch_offsets=tuple(
+                float(item.strip())
+                for item in os.getenv(
+                    "ROBOT_PRESENCE_WAKE_SEARCH_PITCH_OFFSETS",
+                    "-10,10",
+                ).split(",")
+                if item.strip()
+            ),
+            presence_wake_search_settle_seconds=float(
+                os.getenv(
+                    "ROBOT_PRESENCE_WAKE_SEARCH_SETTLE_SECONDS", "0.16"
+                )
+            ),
+            presence_wake_search_frame_timeout_seconds=float(
+                os.getenv(
+                    "ROBOT_PRESENCE_WAKE_SEARCH_FRAME_TIMEOUT_SECONDS", "0.28"
+                )
+            ),
+            presence_wake_smooth_step_degrees=float(
+                os.getenv(
+                    "ROBOT_PRESENCE_WAKE_SMOOTH_STEP_DEGREES", "6"
+                )
+            ),
+            presence_wake_smooth_step_seconds=float(
+                os.getenv(
+                    "ROBOT_PRESENCE_WAKE_SMOOTH_STEP_SECONDS", "0.06"
+                )
             ),
             presence_target_switch_ratio=float(
                 os.getenv("ROBOT_PRESENCE_TARGET_SWITCH_RATIO", "1.25")
@@ -402,8 +455,8 @@ class Settings:
                     ),
                 )
             ),
-            voice_kws_score=float(os.getenv("ROBOT_VOICE_KWS_SCORE", "2.0")),
+            voice_kws_score=float(os.getenv("ROBOT_VOICE_KWS_SCORE", "3.0")),
             voice_kws_threshold=float(
-                os.getenv("ROBOT_VOICE_KWS_THRESHOLD", "0.20")
+                os.getenv("ROBOT_VOICE_KWS_THRESHOLD", "0.12")
             ),
         )

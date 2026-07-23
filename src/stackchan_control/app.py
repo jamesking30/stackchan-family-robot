@@ -130,6 +130,7 @@ def create_app(
         current_settings,
         gateway,
         voice_mode=lambda: voice.state.mode.value,
+        voice_is_speaking=lambda: voice.is_capturing_speech,
     )
 
     async def handle_wake(evidence):

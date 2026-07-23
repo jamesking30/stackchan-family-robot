@@ -36,7 +36,7 @@ class SequenceDetector:
 
     def detect(self, jpeg):
         assert jpeg == b"camera-frame"
-        return next(self.results)
+        return next(self.results, [])
 
 
 class FakeChildAgeClassifier:
@@ -237,7 +237,7 @@ def test_tracking_keeps_centered_face_until_new_face_is_clearly_nearer(
     )
 
 
-def test_wake_reacquire_makes_one_bounded_yaw_and_pitch_correction(
+def test_wake_reacquire_smoothly_centers_visible_face(
     tmp_path: Path,
 ):
     gateway = FakeGateway()
@@ -254,8 +254,8 @@ def test_wake_reacquire_makes_one_bounded_yaw_and_pitch_correction(
 
     assert state["mode"] == "wake_tracking"
     assert state["last_wake_reacquire_found"] is True
-    assert state["current_yaw"] == 5.0
-    assert state["current_pitch"] == 14.0
+    assert state["current_yaw"] == 18.0
+    assert state["current_pitch"] == 21.2
 
 
 def test_wake_reacquire_schedules_full_scan_when_current_view_is_empty(
@@ -274,6 +274,28 @@ def test_wake_reacquire_schedules_full_scan_when_current_view_is_empty(
     assert tracker.mode == "wake_no_target"
     assert tracker.last_wake_reacquire_found is False
     assert tracker._next_full_scan == 0.0
+
+
+def test_wake_reacquire_searches_nearby_pose_before_deferring(
+    tmp_path: Path,
+):
+    face = FaceDetection(0.5, 0.45, 0.35, 0.35, 0.9)
+    tracker = PresenceTracker(
+        settings(
+            tmp_path,
+            presence_wake_search_yaw_offsets=(-18.0,),
+            presence_wake_search_pitch_offsets=(),
+        ),
+        FakeGateway(),  # type: ignore[arg-type]
+        voice_mode=lambda: "speaking",
+        detector=SequenceDetector([[], [face]]),
+    )
+
+    asyncio.run(tracker.reacquire_after_wake())
+
+    assert tracker.mode == "wake_tracking"
+    assert tracker.last_wake_reacquire_found is True
+    assert tracker.snapshot()["current_yaw"] == -18.0
 
 
 def test_wake_reacquire_confirms_child_only_with_both_modalities(

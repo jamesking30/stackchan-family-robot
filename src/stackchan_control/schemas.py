@@ -207,6 +207,7 @@ class VoiceStateResponse(BaseModel):
     awake: bool = False
     last_wake_keyword: str | None = None
     wake_detected_at: datetime | None = None
+    wake_detection_count: int = 0
     last_wake_child_voice: bool | None = None
     last_wake_pitch_hz: float | None = None
     last_wake_voiced_ratio: float | None = None

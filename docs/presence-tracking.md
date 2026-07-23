@@ -16,9 +16,12 @@ StackChan 使用 CoreS3 的 GC0308 摄像头进行本地人员定位。摄像头
 - 新人脸的接近分数至少高出当前目标 25% 才切换，避免在多人之间抖动。
 - 目标连续丢失 30 秒后回中；未发现人时扫描结束立即回中。
 - 正在收音、思考或说话时不扫描。人工舵机命令暂停自动跟踪 60 秒。
-- 检测到唤醒词后立即执行一次当前视角快速重定位，yaw 最多修正 5°、
-  pitch 最多修正 4°，不阻塞后续命令收音；当前视野无人脸时，在本轮
-  对话结束后安排一次完整二维扫描。
+- 检测到唤醒词后，在确认音播放且麦克风暂停期间执行短时二维搜索：
+  先检查当前视角，再依次检查左右 `18°/32°` 和上下 `10°` 的近邻位置。
+- 找到最近人脸后以不超过约 `6°` 的连续小步平滑居中；进入对话监听后
+  每约 2 秒低频校正一次。检测到用户正在说话、机器人思考或回答时暂停
+  舵机，避免机械噪声污染收音。
+- 当前短时搜索无人脸时回到起始角度，并在本轮对话结束后安排完整扫描。
 
 当前安全范围仍为 yaw `-45°–45°`、pitch `0°–45°`。因此“最近人员”
 指摄像头和扫描范围内距离最近且脸部可见的人。摄像头帧只在内存中处理。
@@ -58,11 +61,14 @@ robotctl presence scan
 
 - `ROBOT_PRESENCE_SCAN_INTERVAL_SECONDS`
 - `ROBOT_PRESENCE_TRACKING_INTERVAL_SECONDS`
+- `ROBOT_PRESENCE_ACTIVE_TRACKING_INTERVAL_SECONDS`
 - `ROBOT_PRESENCE_SCAN_YAW_DEGREES`
 - `ROBOT_PRESENCE_SCAN_PITCH_DEGREES`
 - `ROBOT_PRESENCE_SERVO_SPEED`
 - `ROBOT_PRESENCE_YAW_DIRECTION`
 - `ROBOT_PRESENCE_TARGET_SWITCH_RATIO`
+- `ROBOT_PRESENCE_WAKE_SEARCH_YAW_OFFSETS`
+- `ROBOT_PRESENCE_WAKE_SEARCH_PITCH_OFFSETS`
 - `ROBOT_CHILD_IDENTITY_ENABLED`
 - `ROBOT_CHILD_IDENTITY_USER_ID`
 - `ROBOT_CHILD_IDENTITY_MAXIMUM_AGE`

@@ -74,10 +74,8 @@ class FakeWakeDetector:
         self.triggered = False
 
     def accept_pcm(self, pcm: bytes) -> str | None:
-        if not self.triggered:
-            self.triggered = True
-            return "爱莉"
-        return None
+        self.triggered = True
+        return "爱莉"
 
     def reset(self) -> None:
         self.triggered = False
@@ -251,6 +249,28 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
             while time.monotonic() < deadline and not wake_callbacks:
                 time.sleep(0.01)
             assert wake_callbacks == ["not-child"]
+
+            time.sleep(0.4)
+            websocket.send_bytes(pack_frame(MessageType.OPUS, b"microphone-opus"))
+            repeated = [
+                unpack_frame(websocket.receive_bytes()).message_type
+                for _ in range(4)
+            ]
+            assert repeated == [
+                MessageType.STOP_AUDIO_STREAM,
+                MessageType.TEXT_MESSAGE,
+                MessageType.OPUS,
+                MessageType.START_AUDIO_STREAM,
+            ]
+            repeated_state = client.get(
+                "/v1/voice/state", headers=ADMIN_HEADERS
+            ).json()
+            assert repeated_state["awake"] is True
+            assert repeated_state["wake_detection_count"] == 2
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and len(wake_callbacks) < 2:
+                time.sleep(0.01)
+            assert wake_callbacks == ["not-child", "not-child"]
 
             client.post("/v1/voice/stop", headers=ADMIN_HEADERS)
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.STOP_AUDIO_STREAM
