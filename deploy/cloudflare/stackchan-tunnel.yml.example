@@ -1,0 +1,11 @@
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /Users/REPLACE_WITH_USER/.cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  - hostname: robot.example.com
+    path: ^/stackChan/ws$
+    service: http://127.0.0.1:8765
+  - hostname: robot.example.com
+    path: ^/v1/device/ota/check$
+    service: http://127.0.0.1:8765
+  - service: http_status:404

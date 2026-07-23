@@ -12,6 +12,7 @@ import socket
 import subprocess
 from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +62,48 @@ def is_lan_host(value: str) -> bool:
     )
 
 
+def is_dns_host(value: str) -> bool:
+    labels = value.split(".")
+    return len(labels) >= 2 and all(
+        re.fullmatch(
+            r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?",
+            label,
+        )
+        for label in labels
+    )
+
+
+def normalize_gateway_url(value: str) -> tuple[str, str]:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("gateway URL must use http or https")
+    if (
+        not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError(
+            "gateway URL must contain only scheme, hostname, and optional port"
+        )
+    host = parsed.hostname
+    if is_lan_host(host):
+        return value.rstrip("/"), "lan"
+    if parsed.scheme != "https":
+        raise ValueError("a public gateway URL must use https")
+    if not is_dns_host(host):
+        raise ValueError("a public gateway URL must use a DNS hostname")
+    try:
+        ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("a public gateway URL must use a DNS hostname")
+    return value.rstrip("/"), "remote"
+
+
 def validate_token(value: str) -> None:
     if len(value) < 24:
         raise ValueError("ROBOT_DEVICE_API_KEY must contain at least 24 characters")
@@ -95,9 +138,16 @@ def write_private(path: Path, content: str) -> None:
 def generate(args: argparse.Namespace) -> dict[str, object]:
     token = read_device_token()
     validate_token(token)
-    host = args.gateway_host or discover_lan_host()
-    if not is_lan_host(host):
-        raise ValueError("gateway host must be a private IPv4 address or a .local name")
+    if args.gateway_url:
+        gateway_url, gateway_mode = normalize_gateway_url(args.gateway_url)
+    else:
+        host = args.gateway_host or discover_lan_host()
+        if not is_lan_host(host):
+            raise ValueError(
+                "gateway host must be a private IPv4 address or a .local name"
+            )
+        gateway_url = f"http://{host}:{args.gateway_port}"
+        gateway_mode = "lan"
     if not DEVICE_ID_PATTERN.fullmatch(args.device_id):
         raise ValueError("device id contains unsupported characters")
     if not 1 <= args.gateway_port <= 65535:
@@ -106,7 +156,6 @@ def generate(args: argparse.Namespace) -> dict[str, object]:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     output_dir.chmod(0o700)
-    gateway_url = f"http://{host}:{args.gateway_port}"
     ota_url = f"{gateway_url}/v1/device/ota/check"
     token_sha256 = hashlib.sha256(token.encode()).hexdigest()
 
@@ -127,6 +176,7 @@ def generate(args: argparse.Namespace) -> dict[str, object]:
         "schema_version": 1,
         "device_id": args.device_id,
         "gateway_url": gateway_url,
+        "gateway_mode": gateway_mode,
         "ota_url": ota_url,
         "device_auth": {
             "mode": "generated-build-secret",
@@ -144,7 +194,12 @@ def generate(args: argparse.Namespace) -> dict[str, object]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--gateway-host")
+    gateway = parser.add_mutually_exclusive_group()
+    gateway.add_argument("--gateway-host")
+    gateway.add_argument(
+        "--gateway-url",
+        help="HTTPS public gateway base URL, or an explicit LAN HTTP URL",
+    )
     parser.add_argument("--gateway-port", type=int, default=8765)
     parser.add_argument("--device-id", default="stackchan-home-01")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)

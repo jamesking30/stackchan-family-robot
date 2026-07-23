@@ -81,6 +81,78 @@ def test_firmware_config_rejects_weak_key_and_non_lan_host(tmp_path: Path):
     assert "private IPv4" in public.stderr
 
 
+def test_firmware_config_accepts_https_remote_gateway(tmp_path: Path):
+    environment = os.environ.copy()
+    environment["ROBOT_DEVICE_API_KEY"] = "remote-test-device-key-123456789"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--gateway-url",
+            "https://robot.example.com/",
+            "--output-dir",
+            str(tmp_path / "remote"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    metadata = json.loads(
+        (tmp_path / "remote" / "product-config.json").read_text()
+    )
+    assert metadata["gateway_url"] == "https://robot.example.com"
+    assert metadata["gateway_mode"] == "remote"
+    sdkconfig = (tmp_path / "remote" / "sdkconfig.defaults.local").read_text()
+    assert (
+        'CONFIG_STACKCHAN_SERVER_URL="https://robot.example.com"'
+        in sdkconfig
+    )
+
+
+def test_firmware_config_rejects_insecure_public_gateway(tmp_path: Path):
+    environment = os.environ.copy()
+    environment["ROBOT_DEVICE_API_KEY"] = "remote-test-device-key-123456789"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--gateway-url",
+            "http://robot.example.com",
+            "--output-dir",
+            str(tmp_path / "remote"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert "must use https" in result.stderr
+
+
+def test_firmware_config_rejects_public_ip_gateway(tmp_path: Path):
+    environment = os.environ.copy()
+    environment["ROBOT_DEVICE_API_KEY"] = "remote-test-device-key-123456789"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--gateway-url",
+            "https://8.8.8.8",
+            "--output-dir",
+            str(tmp_path / "remote"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert "DNS hostname" in result.stderr
+
+
 def test_bootstrap_creates_distinct_private_keys_without_printing_them(tmp_path: Path):
     env_path = tmp_path / ".env"
     result = subprocess.run(

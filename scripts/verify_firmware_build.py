@@ -118,14 +118,25 @@ def main() -> int:
     )
     server_url = server_line.partition("=")[2].strip('"')
     server_host = urlparse(server_url).hostname or ""
+    parsed_server_url = urlparse(server_url)
     try:
-        server_is_lan = ip_address(server_host).is_private and not ip_address(server_host).is_loopback
+        server_is_lan = (
+            ip_address(server_host).is_private
+            and not ip_address(server_host).is_loopback
+        )
     except ValueError:
         server_is_lan = server_host.endswith(".local")
+    server_is_remote = (
+        parsed_server_url.scheme == "https"
+        and not server_is_lan
+        and "." in server_host
+    )
 
     deployment_blockers = []
-    if not server_is_lan:
-        deployment_blockers.append("upstream server URL has not been replaced by the local Mac gateway")
+    if not server_is_lan and not server_is_remote:
+        deployment_blockers.append(
+            "server URL must be a LAN gateway or an HTTPS remote gateway"
+        )
 
     product_config_path = build_dir / "product-config.json"
     device_auth: dict[str, str] | None = None
@@ -135,6 +146,11 @@ def main() -> int:
         product_config = json.loads(product_config_path.read_text(encoding="utf-8"))
         require(product_config.get("schema_version") == 1, "unsupported product config schema")
         require(product_config.get("gateway_url") == server_url, "product gateway URL differs from sdkconfig")
+        expected_mode = "remote" if server_is_remote else "lan"
+        require(
+            product_config.get("gateway_mode") == expected_mode,
+            "product gateway mode differs from server URL",
+        )
         ota_line = next(
             (line for line in config_lines if line.startswith('CONFIG_OTA_URL="')),
             "",
@@ -164,6 +180,7 @@ def main() -> int:
         "deployment_ready": not deployment_blockers,
         "deployment_blockers": deployment_blockers,
         "gateway_host": server_host,
+        "gateway_mode": "remote" if server_is_remote else "lan",
         "device_auth": device_auth,
         "flash_settings": flash_args["flash_settings"],
         "artifacts": artifacts,

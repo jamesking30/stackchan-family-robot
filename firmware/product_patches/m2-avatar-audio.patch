@@ -18,7 +18,7 @@ index 0fc43ec..2571567 100644
      };
  
      struct ReceivedMessage {
-@@ -61,12 +63,42 @@ public:
+@@ -61,12 +63,48 @@ public:
          std::vector<uint8_t> data;
      };
  
@@ -33,7 +33,14 @@ index 0fc43ec..2571567 100644
 +
      void init()
      {
-         _url = fmt::format("{}/stackChan/ws?deviceType=StackChan", secret_logic::get_server_url());
+-        _url = fmt::format("{}/stackChan/ws?deviceType=StackChan", secret_logic::get_server_url());
++        auto websocket_base = secret_logic::get_server_url();
++        if (websocket_base.rfind("https://", 0) == 0) {
++            websocket_base.replace(0, 5, "wss");
++        } else if (websocket_base.rfind("http://", 0) == 0) {
++            websocket_base.replace(0, 4, "ws");
++        }
++        _url = fmt::format("{}/stackChan/ws?deviceType=StackChan", websocket_base);
  
          connect();
  
