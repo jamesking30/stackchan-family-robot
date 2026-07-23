@@ -64,6 +64,9 @@ class Settings:
         "爱莉希雅",
         "Ai Li",
         "Aili",
+        "Ali",
+        "Ally",
+        "Eli",
         "Ellie",
     )
     voice_wake_session_seconds: float = 45.0
@@ -177,7 +180,7 @@ class Settings:
                 item.strip()
                 for item in os.getenv(
                     "ROBOT_VOICE_WAKE_ALIASES",
-                    "艾莉,爱丽,艾丽,爱里,爱莉希雅,Ai Li,Aili,Ellie",
+                    "艾莉,爱丽,艾丽,爱里,爱莉希雅,Ai Li,Aili,Ali,Ally,Eli,Ellie",
                 ).split(",")
                 if item.strip()
             ),

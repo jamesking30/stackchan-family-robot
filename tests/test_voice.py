@@ -245,6 +245,8 @@ def test_wake_word_variants_and_sleep_phrases(tmp_path: Path):
     assert manager._extract_wake_command("爱莉！今天天气怎么样") == "今天天气怎么样"
     assert manager._extract_wake_command("艾莉 讲个故事") == "讲个故事"
     assert manager._extract_wake_command("Ai Li, hello") == "hello"
+    assert manager._extract_wake_command("Ali!") == ""
+    assert manager._extract_wake_command("Ally, tell me a story") == "tell me a story"
     assert manager._extract_wake_command("我在说爱莉") is None
     assert manager._is_sleep_phrase("休息吧！") is True
 
