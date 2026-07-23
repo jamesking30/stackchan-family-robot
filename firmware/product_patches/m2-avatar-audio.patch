@@ -148,12 +148,16 @@ diff --git a/firmware/main/main.cpp b/firmware/main/main.cpp
 diff --git a/firmware/main/apps/app_avatar/app_avatar.cpp b/firmware/main/apps/app_avatar/app_avatar.cpp
 --- a/firmware/main/apps/app_avatar/app_avatar.cpp
 +++ b/firmware/main/apps/app_avatar/app_avatar.cpp
-@@ -226 +226,3 @@ void AppAvatar::onOpen()
+@@ -225,3 +225,5 @@ void AppAvatar::onOpen()
+     /* ----------------------------- Common widgets ----------------------------- */
 -    view::create_home_indicator([&]() { close(); }, 0xFF9ABC, 0x431525);
 +    // The family-robot build is a dedicated appliance. Do not expose the
 +    // launcher affordance: an accidental tap would hide the Elysia video layer
 +    // while leaving the voice WebSocket alive.
-@@ -252 +254,0 @@ void AppAvatar::onRunning()
+     view::create_status_bar(0xFF9ABC, 0x431525);
+@@ -260,2 +262 @@ void AppAvatar::onRunning()
 -    view::update_home_indicator();
-@@ -284 +285,0 @@ void AppAvatar::onClose()
+     view::update_status_bar();
+@@ -284,2 +285 @@ void AppAvatar::onClose()
 -        view::destroy_home_indicator();
+         view::destroy_status_bar();
