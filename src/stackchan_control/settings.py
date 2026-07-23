@@ -73,7 +73,7 @@ class Settings:
     )
     voice_wake_session_seconds: float = 45.0
     voice_sleep_phrases: tuple[str, ...] = ("再见", "休息吧", "不用了")
-    voice_wake_ack_pcm: Path = PROJECT_ROOT / "var/cache/voice/wake-ack.pcm"
+    voice_wake_ack_pcm: Path = PROJECT_ROOT / "var/cache/voice/wake-ack-v2.wav"
     voice_kws_enabled: bool = False
     voice_kws_model_dir: Path = (
         PROJECT_ROOT
@@ -209,7 +209,7 @@ class Settings:
             voice_wake_ack_pcm=project_path(
                 os.getenv(
                     "ROBOT_VOICE_WAKE_ACK_PCM",
-                    str(PROJECT_ROOT / "var/cache/voice/wake-ack.pcm"),
+                    str(PROJECT_ROOT / "var/cache/voice/wake-ack-v2.wav"),
                 )
             ),
             voice_kws_enabled=os.getenv(

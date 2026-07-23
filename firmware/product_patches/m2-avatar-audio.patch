@@ -84,7 +84,7 @@ index 0fc43ec..2571567 100644
 +                    if (_audio_initialized && msg.data.size() > 5) {
 +                        auto packet            = std::make_unique<AudioStreamPacket>();
 +                        packet->sample_rate    = 24000;
-+                        packet->frame_duration = OPUS_FRAME_DURATION_MS;
++                        packet->frame_duration = 20;
 +                        packet->payload.assign(msg.data.begin() + 5, msg.data.end());
 +                        if (!_audio_service.PushPacketToDecodeQueue(std::move(packet))) {
 +                            ESP_LOGW(_tag.c_str(), "Audio playback queue full, dropping frame");

@@ -1,5 +1,6 @@
 import json
 import time
+import wave
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -7,12 +8,20 @@ from fastapi.testclient import TestClient
 from stackchan_control.app import create_app
 from stackchan_control.gateway import MessageType, pack_frame, unpack_frame
 from stackchan_control.settings import PROJECT_ROOT, Settings
-from stackchan_control.voice import VoiceSessionManager
+from stackchan_control.voice import OpusCodec, VoiceSessionManager
 
 
 ADMIN_HEADERS = {"X-Robot-Admin-Key": "admin-secret"}
 DEVICE_HEADERS = {"Authorization": "device-secret"}
 WS_PATH = "/stackChan/ws?deviceType=StackChan"
+
+
+def write_pcm_wav(path: Path, pcm: bytes, sample_rate: int = 24000) -> None:
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm)
 
 
 class FakeVoiceProvider:
@@ -184,8 +193,8 @@ def test_background_speech_does_not_reach_deepseek(tmp_path: Path):
 
 def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path):
     detector = FakeWakeDetector()
-    ack_path = tmp_path / "wake-ack.pcm"
-    ack_path.write_bytes(b"\x01\x00" * 320)
+    ack_path = tmp_path / "wake-ack-v2.wav"
+    write_pcm_wav(ack_path, b"\x01\x00" * 320)
     settings = Settings(
         db_path=tmp_path / "kws.db",
         seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
@@ -305,8 +314,8 @@ def test_synthesized_speech_is_peak_normalized_to_full_scale():
 
 def test_cached_wake_ack_is_loaded_from_runtime_cache(tmp_path: Path):
     cached_pcm = b"\x01\x00" * 320
-    ack_path = tmp_path / "wake-ack.pcm"
-    ack_path.write_bytes(cached_pcm)
+    ack_path = tmp_path / "wake-ack-v2.wav"
+    write_pcm_wav(ack_path, cached_pcm)
     settings = Settings(
         db_path=tmp_path / "wake-cache.db",
         seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
@@ -316,3 +325,29 @@ def test_cached_wake_ack_is_loaded_from_runtime_cache(tmp_path: Path):
     manager = VoiceSessionManager(settings, None, None)  # type: ignore[arg-type]
 
     assert manager._load_wake_ack_pcm() == cached_pcm
+
+
+def test_cached_wake_ack_rejects_wrong_sample_rate(tmp_path: Path):
+    ack_path = tmp_path / "wake-ack-v2.wav"
+    write_pcm_wav(ack_path, b"\x01\x00" * 320, sample_rate=16000)
+    settings = Settings(
+        db_path=tmp_path / "wake-cache.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        voice_wake_ack_pcm=ack_path,
+    )
+    manager = VoiceSessionManager(settings, None, None)  # type: ignore[arg-type]
+
+    assert manager._load_wake_ack_pcm() is None
+
+
+def test_opus_speech_uses_twenty_millisecond_frames():
+    codec = OpusCodec()
+    try:
+        pcm_100ms = b"\x00\x00" * (24000 // 10)
+        packets = codec.encode_speech(pcm_100ms)
+    finally:
+        codec.close()
+
+    assert len(packets) == 5
+    assert all(packets)

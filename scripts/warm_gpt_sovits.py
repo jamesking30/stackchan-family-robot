@@ -13,7 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "var/models/gpt-sovits/elysia/reference-happy.wav"
-ACK_CACHE = ROOT / "var/cache/voice/wake-ack.pcm"
+ACK_CACHE = ROOT / "var/cache/voice/wake-ack-v2.wav"
+ACK_MANIFEST = ROOT / "var/cache/voice/wake-ack-v2.json"
 
 
 def main() -> int:
@@ -65,14 +66,16 @@ def main() -> int:
             "error",
             "-i",
             "pipe:0",
+            "-af",
+            "loudnorm=I=-18:TP=-2:LRA=7",
             "-f",
-            "s16le",
+            "wav",
             "-acodec",
             "pcm_s16le",
             "-ac",
             "1",
             "-ar",
-            "16000",
+            "24000",
             "pipe:1",
         ],
         input=wav_audio,
@@ -82,6 +85,24 @@ def main() -> int:
     if conversion.returncode != 0 or not conversion.stdout:
         return 1
     ACK_CACHE.write_bytes(conversion.stdout)
+    ACK_MANIFEST.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "sample_rate": 24000,
+                "channels": 1,
+                "sample_width_bytes": 2,
+                "target_loudness_lufs": -18,
+                "true_peak_dbtp": -2,
+                "voice_model": "elysia-v2",
+                "text": "我在。",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return 0
 
 

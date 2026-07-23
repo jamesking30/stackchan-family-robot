@@ -461,6 +461,10 @@ class LocalDeepSeekVoiceProvider:
 
 
 class OpusCodec:
+    SPEECH_SAMPLE_RATE = 24000
+    SPEECH_FRAME_DURATION_MS = 20
+    SPEECH_BITRATE = 48000
+
     def __init__(self) -> None:
         self._lib = self._load_library()
         self._configure_library()
@@ -472,6 +476,10 @@ class OpusCodec:
         if not self._encoder or error.value != 0:
             self._lib.opus_decoder_destroy(self._decoder)
             raise VoiceError(f"failed to create 24kHz Opus encoder: {error.value}")
+        self._set_encoder_option(4002, self.SPEECH_BITRATE)  # OPUS_SET_BITRATE
+        self._set_encoder_option(4006, 1)  # OPUS_SET_VBR
+        self._set_encoder_option(4010, 10)  # OPUS_SET_COMPLEXITY
+        self._set_encoder_option(4024, 3001)  # OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE)
 
     def decode_microphone(self, packet: bytes) -> bytes:
         frame_size = 960
@@ -485,7 +493,9 @@ class OpusCodec:
         return bytes(output)[: samples * 2]
 
     def encode_speech(self, pcm: bytes) -> list[bytes]:
-        frame_bytes = 24000 * 60 // 1000 * 2
+        frame_bytes = (
+            self.SPEECH_SAMPLE_RATE * self.SPEECH_FRAME_DURATION_MS // 1000 * 2
+        )
         packets: list[bytes] = []
         for offset in range(0, len(pcm), frame_bytes):
             frame = pcm[offset : offset + frame_bytes]
@@ -500,6 +510,17 @@ class OpusCodec:
                 raise VoiceError(f"Opus speech encode failed: {encoded_bytes}")
             packets.append(bytes(output[:encoded_bytes]))
         return packets
+
+    def _set_encoder_option(self, request: int, value: int) -> None:
+        result = self._lib.opus_encoder_ctl(
+            self._encoder,
+            ctypes.c_int(request),
+            ctypes.c_int(value),
+        )
+        if result != 0:
+            raise VoiceError(
+                f"failed to configure Opus encoder request {request}: {result}"
+            )
 
     def close(self) -> None:
         decoder = getattr(self, "_decoder", None)
@@ -561,6 +582,8 @@ class OpusCodec:
         ]
         self._lib.opus_encoder_create.restype = ctypes.c_void_p
         self._lib.opus_encoder_destroy.argtypes = [ctypes.c_void_p]
+        self._lib.opus_encoder_ctl.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.opus_encoder_ctl.restype = ctypes.c_int
         self._lib.opus_encode.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(ctypes.c_int16),
@@ -938,7 +961,7 @@ class VoiceSessionManager:
                     if first_segment:
                         self._record_latency("first_audio_sent", turn_started)
                         first_segment = False
-                    await asyncio.sleep(0.06)
+                    await asyncio.sleep(OpusCodec.SPEECH_FRAME_DURATION_MS / 1000)
             if not answer:
                 raise VoiceError("DeepSeek returned no spoken text")
             if direct_answer is None:
@@ -1112,7 +1135,22 @@ class VoiceSessionManager:
         path = self.settings.voice_wake_ack_pcm
         if not path.is_file():
             return None
-        pcm = path.read_bytes()
+        try:
+            with wave.open(str(path), "rb") as wav:
+                if (
+                    wav.getnchannels() != 1
+                    or wav.getsampwidth() != 2
+                    or wav.getframerate() != OpusCodec.SPEECH_SAMPLE_RATE
+                    or wav.getcomptype() != "NONE"
+                ):
+                    logger.warning(
+                        "wake acknowledgement has an unsupported format: %s", path
+                    )
+                    return None
+                pcm = wav.readframes(wav.getnframes())
+        except (OSError, EOFError, wave.Error):
+            logger.warning("wake acknowledgement could not be read: %s", path)
+            return None
         return pcm or None
 
     async def _acknowledge_wake_word(self) -> None:
@@ -1128,10 +1166,9 @@ class VoiceSessionManager:
             {"name": "爱莉", "content": "我在，你说吧。"},
         )
         if cached_pcm:
-            cached_pcm = self._maximize_speech_pcm(cached_pcm)
             for packet in self.codec.encode_speech(cached_pcm):
                 await self.gateway.send(MessageType.OPUS, packet)
-                await asyncio.sleep(0.06)
+                await asyncio.sleep(OpusCodec.SPEECH_FRAME_DURATION_MS / 1000)
         await asyncio.sleep(0.12)
         await self.gateway.send(MessageType.START_AUDIO_STREAM)
         self._clear_audio()
