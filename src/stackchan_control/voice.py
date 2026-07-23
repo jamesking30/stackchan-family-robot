@@ -125,6 +125,8 @@ class LocalDeepSeekVoiceProvider:
         if self.whisper_server_url:
             try:
                 return await self._transcribe_with_server(wav_audio)
+            except NoSpeechDetected:
+                raise
             except (httpx.HTTPError, VoiceError, ValueError) as exc:
                 logger.warning(
                     "persistent Whisper unavailable; using CLI fallback: %s", exc
@@ -767,10 +769,8 @@ class VoiceSessionManager:
                     keyword,
                     self.wake_detector.last_frame_latency_ms,
                 )
-                await self.gateway.send_json(
-                    MessageType.TEXT_MESSAGE,
-                    {"name": "爱莉", "content": "我在听…"},
-                )
+                await self._acknowledge_wake_word()
+                return
         self._pre_roll.append(pcm)
         rms = audioop.rms(pcm, 2)
         self.state.audio_rms = rms
@@ -1104,6 +1104,29 @@ class VoiceSessionManager:
             return None
         pcm = path.read_bytes()
         return pcm or None
+
+    async def _acknowledge_wake_word(self) -> None:
+        """Give immediate audible feedback, then start a fresh command capture."""
+        assert self.codec is not None
+        cached_pcm = self._load_wake_ack_pcm()
+        self._set_mode(VoiceMode.SPEAKING)
+        self._clear_audio()
+        await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
+        await self.gateway.send_json(
+            MessageType.TEXT_MESSAGE,
+            {"name": "爱莉", "content": "我在，你说吧。"},
+        )
+        if cached_pcm:
+            cached_pcm = self._maximize_speech_pcm(cached_pcm)
+            for packet in self.codec.encode_speech(cached_pcm):
+                await self.gateway.send(MessageType.OPUS, packet)
+                await asyncio.sleep(0.06)
+        await asyncio.sleep(0.12)
+        await self.gateway.send(MessageType.START_AUDIO_STREAM)
+        self._clear_audio()
+        self._ignore_audio_until = time.monotonic() + 0.35
+        self._activate_wake_session()
+        self._set_mode(self._idle_mode())
 
     def _clear_audio(self) -> None:
         self._pre_roll.clear()

@@ -184,6 +184,8 @@ def test_background_speech_does_not_reach_deepseek(tmp_path: Path):
 
 def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path):
     detector = FakeWakeDetector()
+    ack_path = tmp_path / "wake-ack.pcm"
+    ack_path.write_bytes(b"\x01\x00" * 320)
     settings = Settings(
         db_path=tmp_path / "kws.db",
         seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
@@ -191,6 +193,7 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
         admin_api_key="admin-secret",
         device_api_key="device-secret",
         voice_kws_enabled=True,
+        voice_wake_ack_pcm=ack_path,
     )
     with TestClient(
         create_app(
@@ -210,13 +213,21 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
             time.sleep(0.4)
 
             websocket.send_bytes(pack_frame(MessageType.OPUS, b"microphone-opus"))
+            microphone_pause = unpack_frame(websocket.receive_bytes())
             feedback = unpack_frame(websocket.receive_bytes())
+            audio = unpack_frame(websocket.receive_bytes())
+            microphone_resume = unpack_frame(websocket.receive_bytes())
+            assert microphone_pause.message_type == MessageType.STOP_AUDIO_STREAM
             assert feedback.message_type == MessageType.TEXT_MESSAGE
-            assert json.loads(feedback.payload)["content"] == "我在听…"
+            assert json.loads(feedback.payload)["content"] == "我在，你说吧。"
+            assert audio.message_type == MessageType.OPUS
+            assert audio.payload == b"speaker-opus"
+            assert microphone_resume.message_type == MessageType.START_AUDIO_STREAM
 
             state = client.get("/v1/voice/state", headers=ADMIN_HEADERS).json()
             assert state["awake"] is True
             assert state["last_wake_keyword"] == "爱莉"
+            assert state["mode"] == "listening"
             assert state["latency_ms"]["kws_frame"] == 3.2
 
             client.post("/v1/voice/stop", headers=ADMIN_HEADERS)
