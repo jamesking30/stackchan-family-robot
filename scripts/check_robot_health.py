@@ -90,6 +90,9 @@ def main() -> int:
         result["robot_online"] = bool(state.get("online"))
         voice_state = request_json("/v1/voice/state", admin=True)
         result["voice_mode"] = str(voice_state.get("mode", "unknown"))
+        result["voice_latency"] = request_json(
+            "/v1/voice/metrics", admin=True
+        ).get("percentiles_ms", {})
     except (OSError, ValueError, urllib.error.URLError) as exc:
         problems.append(f"control service unavailable: {exc}")
 
@@ -124,6 +127,13 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    history = ROOT / "var/health/history.jsonl"
+    existing = history.read_text(encoding="utf-8").splitlines() if history.is_file() else []
+    history.write_text(
+        "\n".join([*existing[-499:], json.dumps(result, ensure_ascii=False)])
+        + "\n",
+        encoding="utf-8",
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 1 if problems else 0

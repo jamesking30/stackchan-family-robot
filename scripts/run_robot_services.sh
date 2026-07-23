@@ -6,12 +6,14 @@ TTS_PID=""
 GPT_SOVITS_PID=""
 WHISPER_PID=""
 ROBOT_PID=""
+MDNS_PID=""
 
 cleanup() {
   [[ -n "$ROBOT_PID" ]] && kill "$ROBOT_PID" 2>/dev/null || true
   [[ -n "$TTS_PID" ]] && kill "$TTS_PID" 2>/dev/null || true
   [[ -n "$GPT_SOVITS_PID" ]] && kill "$GPT_SOVITS_PID" 2>/dev/null || true
   [[ -n "$WHISPER_PID" ]] && kill "$WHISPER_PID" 2>/dev/null || true
+  [[ -n "$MDNS_PID" ]] && kill "$MDNS_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -70,9 +72,28 @@ start_whisper() {
   WHISPER_PID=$!
 }
 
+start_mdns() {
+  local enabled
+  enabled="$(sed -n 's/^ROBOT_MDNS_ENABLED=//p' "$ROOT_DIR/.env" | tail -1)"
+  if [[ "${enabled:-true}" != "true" ]] || ! command -v dns-sd >/dev/null; then
+    return
+  fi
+  local lan_ip
+  lan_ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+  if [[ -z "$lan_ip" ]]; then
+    return
+  fi
+  dns-sd -P StackChan-Family _stackchan._tcp local 8765 \
+    stackchan-family.local "$lan_ip" \
+    "path=/stackChan/ws" "device=${STACKCHAN_DEVICE_ID:-stackchan-home-01}" \
+    >"$ROOT_DIR/var/logs/mdns.log" 2>&1 &
+  MDNS_PID=$!
+}
+
 start_qwen
 start_gpt_sovits
 start_whisper
+start_mdns
 
 for _ in {1..40}; do
   if curl --fail --silent http://127.0.0.1:8766/v1/models >/dev/null 2>&1; then

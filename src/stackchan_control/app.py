@@ -248,6 +248,10 @@ def create_app(
             required_paths["wake_word_keywords"] = (
                 current_settings.voice_kws_keywords_file
             )
+        if current_settings.voice_silero_vad_enabled:
+            required_paths["silero_vad_model"] = (
+                current_settings.voice_silero_vad_model
+            )
         if current_settings.presence_enabled:
             required_paths["presence_face_model"] = (
                 current_settings.presence_face_model
@@ -264,7 +268,10 @@ def create_app(
             name for name, path in required_paths.items() if not path.exists()
         ]
         voice_configured = bool(
-            current_settings.deepseek_api_key
+            (
+                current_settings.deepseek_api_key
+                or current_settings.local_llm_enabled
+            )
             and current_settings.voice_whisper_model.is_file()
         )
         wake_word_ready = bool(
@@ -286,6 +293,8 @@ def create_app(
             "voice_configured": voice_configured,
             "voice_ready": voice_ready,
             "wake_word_ready": wake_word_ready,
+            "silero_vad_ready": voice.state.silero_vad_ready,
+            "voice_latency": voice.latency_tracker.snapshot()["percentiles_ms"],
             "presence_enabled": current_settings.presence_enabled,
             "presence_ready": (
                 not current_settings.presence_enabled
@@ -520,6 +529,13 @@ def create_app(
     )
     async def voice_state() -> dict[str, object]:
         return voice.state.snapshot()
+
+    @app.get(
+        "/v1/voice/metrics",
+        dependencies=[Depends(require_admin)],
+    )
+    async def voice_metrics() -> dict[str, object]:
+        return voice.latency_tracker.snapshot()
 
     @app.post(
         "/v1/voice/start",

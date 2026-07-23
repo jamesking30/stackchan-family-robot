@@ -33,4 +33,10 @@
 ./scripts/check_robot_health.py
 ```
 
-最近一次检查会保存到 `var/health/latest.json`，服务日志位于 `var/logs/`。
+最近一次检查会保存到 `var/health/latest.json`，最近 500 次检查保存在
+`var/health/history.jsonl`，服务日志位于 `var/logs/`。语音链路另外保存
+不含对话内容的延迟样本，可通过 `/v1/voice/metrics` 查看各阶段 P50/P95。
+
+主机同时通过 Bonjour 发布 `_stackchan._tcp` 服务和
+`stackchan-family.local` 地址。当前固件继续使用已验证的固定地址；待设备端
+加入 mDNS 浏览后即可无缝移除固件中的固定 IP，不需要更改主机服务。

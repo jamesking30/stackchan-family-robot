@@ -96,6 +96,12 @@ class Settings:
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
+    local_llm_enabled: bool = False
+    local_llm_base_url: str = "http://127.0.0.1:8080/v1"
+    local_llm_model: str = "mlx-community/Qwen3-4B-Instruct-4bit"
+    local_llm_api_key: str = "local"
+    voice_latency_history: Path | None = None
+    voice_latency_max_samples: int = 200
     voice_auto_start: bool = False
     voice_user_id: str = "user-2"
     voice_whisper_binary: str = "whisper-cli"
@@ -122,6 +128,9 @@ class Settings:
     voice_max_speech_seconds: int = 15
     voice_device_vad_enabled: bool = True
     voice_device_vad_hangover_ms: int = 240
+    voice_silero_vad_enabled: bool = False
+    voice_silero_vad_model: Path = PROJECT_ROOT / "var/models/silero_vad.onnx"
+    voice_silero_vad_threshold: float = 0.50
     voice_servo_noise_guard_ms: int = 320
     voice_wake_word: str = "爱莉"
     voice_wake_aliases: tuple[str, ...] = (
@@ -374,6 +383,27 @@ class Settings:
                 "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
             ).rstrip("/"),
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            local_llm_enabled=os.getenv(
+                "ROBOT_LOCAL_LLM_ENABLED", "false"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            local_llm_base_url=os.getenv(
+                "ROBOT_LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080/v1"
+            ).rstrip("/"),
+            local_llm_model=os.getenv(
+                "ROBOT_LOCAL_LLM_MODEL",
+                "mlx-community/Qwen3-4B-Instruct-4bit",
+            ),
+            local_llm_api_key=os.getenv("ROBOT_LOCAL_LLM_API_KEY", "local"),
+            voice_latency_history=project_path(
+                os.getenv(
+                    "ROBOT_VOICE_LATENCY_HISTORY",
+                    "var/health/voice-latency.jsonl",
+                )
+            ),
+            voice_latency_max_samples=int(
+                os.getenv("ROBOT_VOICE_LATENCY_MAX_SAMPLES", "200")
+            ),
             voice_auto_start=os.getenv("ROBOT_VOICE_AUTO_START", "false").lower()
             in {"1", "true", "yes", "on"},
             voice_user_id=os.getenv("ROBOT_VOICE_USER_ID", "user-2"),
@@ -444,6 +474,19 @@ class Settings:
             in {"1", "true", "yes", "on"},
             voice_device_vad_hangover_ms=int(
                 os.getenv("ROBOT_VOICE_DEVICE_VAD_HANGOVER_MS", "240")
+            ),
+            voice_silero_vad_enabled=os.getenv(
+                "ROBOT_VOICE_SILERO_VAD_ENABLED", "true"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            voice_silero_vad_model=project_path(
+                os.getenv(
+                    "ROBOT_VOICE_SILERO_VAD_MODEL",
+                    "var/models/silero_vad.onnx",
+                )
+            ),
+            voice_silero_vad_threshold=float(
+                os.getenv("ROBOT_VOICE_SILERO_VAD_THRESHOLD", "0.50")
             ),
             voice_servo_noise_guard_ms=int(
                 os.getenv("ROBOT_VOICE_SERVO_NOISE_GUARD_MS", "320")

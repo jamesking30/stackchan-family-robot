@@ -81,6 +81,11 @@ class FakeWakeDetector:
         self.triggered = False
 
 
+class SilentWakeDetector(FakeWakeDetector):
+    def accept_pcm(self, pcm: bytes) -> str | None:
+        return None
+
+
 def test_bilingual_voice_turn_stays_in_memory_and_reaches_robot(tmp_path: Path):
     provider = FakeVoiceProvider()
     settings = Settings(
@@ -273,6 +278,37 @@ def test_streaming_keyword_spotter_acks_before_full_transcription(tmp_path: Path
 
             client.post("/v1/voice/stop", headers=ADMIN_HEADERS)
             assert unpack_frame(websocket.receive_bytes()).message_type == MessageType.STOP_AUDIO_STREAM
+
+
+def test_kws_standby_never_sends_background_audio_to_whisper(tmp_path: Path):
+    provider = FakeVoiceProvider("背景对话")
+    settings = Settings(
+        db_path=tmp_path / "kws-only.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        voice_kws_enabled=True,
+    )
+    manager = VoiceSessionManager(
+        settings,
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        provider=provider,
+        codec=FakeOpusCodec(),
+        wake_detector=SilentWakeDetector(),
+    )
+    manager.state.enabled = True
+    manager.state.mode = VoiceMode.WAITING_FOR_WAKE_WORD
+
+    import asyncio
+
+    async def feed_background():
+        for _ in range(30):
+            await manager.ingest_opus(b"microphone-opus")
+
+    asyncio.run(feed_background())
+
+    assert provider.transcribe_calls == 0
+    assert manager.is_capturing_speech is False
 
 
 def test_wake_word_variants_and_sleep_phrases(tmp_path: Path):

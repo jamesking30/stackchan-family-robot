@@ -161,6 +161,35 @@ def test_deepseek_text_provider_uses_v4_without_thinking(
     }
 
 
+def test_local_openai_compatible_model_can_replace_deepseek(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    model_path = tmp_path / "ggml-small.bin"
+    model_path.write_bytes(b"model")
+    monkeypatch.setattr("stackchan_control.voice.shutil.which", lambda _: "/usr/bin/tool")
+    monkeypatch.setattr("stackchan_control.voice.httpx.AsyncClient", FakeDeepSeekClient)
+    settings = Settings(
+        db_path=tmp_path / "voice.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        local_llm_enabled=True,
+        local_llm_base_url="http://127.0.0.1:8080/v1",
+        local_llm_model="local-model",
+        voice_whisper_model=model_path,
+    )
+
+    answer = asyncio.run(
+        LocalDeepSeekVoiceProvider(settings).answer("system rules", "你好")
+    )
+
+    assert answer == "你好，我是爱莉。"
+    assert FakeDeepSeekClient.request_url == (
+        "http://127.0.0.1:8080/v1/chat/completions"
+    )
+    assert FakeDeepSeekClient.request_json["model"] == "local-model"
+    assert "thinking" not in FakeDeepSeekClient.request_json
+
+
 @pytest.mark.parametrize(
     "text",
     ["", "[BLANK_AUDIO]", "MBC 뉴스 이덕영입니다.", "(字幕製作:貝爾)"],

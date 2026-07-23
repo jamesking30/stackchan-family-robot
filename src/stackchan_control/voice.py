@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Protocol
 
 import httpx
+import numpy as np
 
 from .avatar import AvatarController
 from .child_identity import ChildVoiceClassifier, ChildVoiceEvidence
 from .gateway import DeviceOfflineError, MessageType, StackChanGateway
+from .metrics import VoiceLatencyTracker
 from .repository import RobotRepository
 from .settings import Settings
 from .wake import SherpaWakeWordDetector, WakeWordDetector
@@ -39,6 +41,33 @@ class VoiceError(RuntimeError):
 
 class NoSpeechDetected(VoiceError):
     pass
+
+
+class SileroSpeechDetector:
+    def __init__(self, settings: Settings) -> None:
+        import sherpa_onnx
+
+        silero = sherpa_onnx.SileroVadModelConfig(
+            model=str(settings.voice_silero_vad_model),
+            threshold=settings.voice_silero_vad_threshold,
+            min_silence_duration=settings.voice_silence_ms / 1000,
+            min_speech_duration=settings.voice_min_speech_ms / 1000,
+            max_speech_duration=settings.voice_max_speech_seconds,
+        )
+        config = sherpa_onnx.VadModelConfig(
+            silero_vad=silero, sample_rate=16000, num_threads=1, provider="cpu"
+        )
+        self._detector = sherpa_onnx.VoiceActivityDetector(
+            config, buffer_size_in_seconds=30
+        )
+
+    def accept_pcm(self, pcm: bytes) -> bool:
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        self._detector.accept_waveform(samples)
+        return bool(self._detector.is_speech_detected())
+
+    def reset(self) -> None:
+        self._detector.reset()
 
 
 def resolve_local_executable(command: str) -> str:
@@ -92,11 +121,17 @@ class LocalDeepSeekVoiceProvider:
     """Local ASR/TTS with DeepSeek receiving text only."""
 
     def __init__(self, settings: Settings) -> None:
-        if not settings.deepseek_api_key:
-            raise VoiceError("DEEPSEEK_API_KEY is required for voice conversations")
-        self.api_key = settings.deepseek_api_key
+        if not settings.deepseek_api_key and not settings.local_llm_enabled:
+            raise VoiceError(
+                "DEEPSEEK_API_KEY or ROBOT_LOCAL_LLM_ENABLED is required"
+            )
+        self.api_key = settings.deepseek_api_key or ""
         self.base_url = settings.deepseek_base_url.rstrip("/")
         self.model = settings.deepseek_model
+        self.local_llm_enabled = settings.local_llm_enabled
+        self.local_llm_base_url = settings.local_llm_base_url
+        self.local_llm_model = settings.local_llm_model
+        self.local_llm_api_key = settings.local_llm_api_key
         self.whisper_binary = resolve_local_executable(settings.voice_whisper_binary)
         self.whisper_server_url = settings.voice_whisper_server_url
         self.say_binary = resolve_local_executable("say")
@@ -236,19 +271,41 @@ class LocalDeepSeekVoiceProvider:
         transcript: str,
         history: list[dict[str, str]] | None = None,
     ) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={**self.headers, "Content-Type": "application/json"},
-                json={
-                    "model": self.model,
-                    "messages": self._messages(instructions, transcript, history),
-                    "thinking": {"type": "disabled"},
-                    "max_tokens": 240,
-                    "stream": False,
-                },
+        payload = {
+            "model": self.model,
+            "messages": self._messages(instructions, transcript, history),
+            "thinking": {"type": "disabled"},
+            "max_tokens": 240,
+            "stream": False,
+        }
+        if not self.api_key and self.local_llm_enabled:
+            payload.pop("thinking", None)
+            payload["model"] = self.local_llm_model
+            response = await self._post_chat(
+                self.local_llm_base_url,
+                {"Authorization": f"Bearer {self.local_llm_api_key}"},
+                payload,
+                operation="local response",
+                deepseek=False,
             )
-        self._raise(response, "response")
+        else:
+            try:
+                response = await self._post_chat(
+                    self.base_url, self.headers, payload, operation="response"
+                )
+            except (httpx.HTTPError, VoiceError):
+                if not self.local_llm_enabled:
+                    raise
+                logger.warning("DeepSeek unavailable; using the local language model")
+                payload.pop("thinking", None)
+                payload["model"] = self.local_llm_model
+                response = await self._post_chat(
+                    self.local_llm_base_url,
+                    {"Authorization": f"Bearer {self.local_llm_api_key}"},
+                    payload,
+                    operation="local response",
+                    deepseek=False,
+                )
         body = response.json()
         choices = body.get("choices", [])
         answer = ""
@@ -257,6 +314,29 @@ class LocalDeepSeekVoiceProvider:
         if not answer:
             raise VoiceError("DeepSeek returned no spoken text")
         return answer
+
+    async def _post_chat(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        payload: dict[str, object],
+        *,
+        operation: str,
+        deepseek: bool = True,
+    ) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers={**headers, "Content-Type": "application/json"},
+                json=payload,
+            )
+        if deepseek:
+            self._raise(response, operation)
+        elif not response.is_success:
+            raise VoiceError(
+                f"local language model failed with HTTP {response.status_code}"
+            )
+        return response
 
     async def answer_segments(
         self,
@@ -271,37 +351,46 @@ class LocalDeepSeekVoiceProvider:
             "max_tokens": 180,
             "stream": True,
         }
+        if not self.api_key and self.local_llm_enabled:
+            yield await self.answer(instructions, transcript, history)
+            return
         buffer = ""
         yielded = False
-        async with httpx.AsyncClient(timeout=60) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers={**self.headers, "Content-Type": "application/json"},
-                json=payload,
-            ) as response:
-                self._raise(response, "streaming response")
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    try:
-                        body = json.loads(data)
-                        raw_delta = (
-                            body.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("content", "")
-                        )
-                        delta = raw_delta if isinstance(raw_delta, str) else ""
-                    except (ValueError, KeyError, IndexError, TypeError):
-                        continue
-                    buffer += delta
-                    segments, buffer = self._pop_spoken_segments(buffer)
-                    for segment in segments:
-                        yielded = True
-                        yield segment
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers={**self.headers, "Content-Type": "application/json"},
+                    json=payload,
+                ) as response:
+                    self._raise(response, "streaming response")
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if not data or data == "[DONE]":
+                            continue
+                        try:
+                            body = json.loads(data)
+                            raw_delta = (
+                                body.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content", "")
+                            )
+                            delta = raw_delta if isinstance(raw_delta, str) else ""
+                        except (ValueError, KeyError, IndexError, TypeError):
+                            continue
+                        buffer += delta
+                        segments, buffer = self._pop_spoken_segments(buffer)
+                        for segment in segments:
+                            yielded = True
+                            yield segment
+        except (httpx.HTTPError, VoiceError):
+            if not self.local_llm_enabled or yielded:
+                raise
+            yield await self.answer(instructions, transcript, history)
+            return
         tail = buffer.strip()
         if tail:
             yielded = True
@@ -352,6 +441,96 @@ class LocalDeepSeekVoiceProvider:
         if not self.tts_fallback_to_system:
             raise VoiceError("all configured local speech synthesis services failed")
         return await self._synthesize_system(text)
+
+    async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
+        """Yield 24 kHz mono PCM while GPT-SoVITS is still generating."""
+        if self.tts_provider != "gpt_sovits" or not self.gpt_sovits_base_url:
+            yield await self.synthesize(text)
+            return
+        yielded = False
+        try:
+            async for chunk in self._stream_gpt_sovits_pcm(text):
+                yielded = True
+                yield chunk
+            return
+        except Exception as exc:
+            if yielded:
+                raise VoiceError(
+                    f"GPT-SoVITS stream stopped after playback began: {exc}"
+                ) from exc
+            logger.warning("streaming GPT-SoVITS failed; using buffered TTS: %s", exc)
+        yield await self.synthesize(text)
+
+    async def _stream_gpt_sovits_pcm(self, text: str) -> AsyncIterator[bytes]:
+        if not self.gpt_sovits_ref_audio.is_file():
+            raise VoiceError(
+                f"GPT-SoVITS reference audio was not found: {self.gpt_sovits_ref_audio}"
+            )
+        process = await asyncio.create_subprocess_exec(
+            self.ffmpeg_binary,
+            "-nostdin",
+            "-v",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "24000",
+            "-ac",
+            "1",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        text_lang = "zh" if re.search(r"[\u3400-\u9fff]", text) else "en"
+        payload = {
+            "text": text,
+            "text_lang": text_lang,
+            "ref_audio_path": str(self.gpt_sovits_ref_audio),
+            "prompt_text": self.gpt_sovits_prompt_text,
+            "prompt_lang": self.gpt_sovits_prompt_lang,
+            "text_split_method": "cut5",
+            "batch_size": 1,
+            "speed_factor": self.gpt_sovits_speed,
+            "media_type": "wav",
+            "streaming_mode": 2,
+            "parallel_infer": True,
+            "repetition_penalty": 1.35,
+        }
+
+        async def feed(response: httpx.Response) -> None:
+            assert process.stdin is not None
+            async for data in response.aiter_bytes(8192):
+                process.stdin.write(data)
+                await process.stdin.drain()
+            process.stdin.close()
+
+        async with httpx.AsyncClient(timeout=180) as client:
+            async with client.stream(
+                "POST", f"{self.gpt_sovits_base_url}/tts", json=payload
+            ) as response:
+                if not response.is_success:
+                    raise VoiceError(
+                        f"GPT-SoVITS stream failed with HTTP {response.status_code}"
+                    )
+                feeder = asyncio.create_task(feed(response))
+                assert process.stdout is not None
+                while chunk := await process.stdout.read(9600):
+                    yield chunk
+                await feeder
+        stderr = b""
+        if process.stderr is not None:
+            stderr = await process.stderr.read()
+        code = await process.wait()
+        if code != 0:
+            raise VoiceError(
+                f"streaming audio conversion failed: "
+                f"{stderr.decode(errors='replace')[-160:]}"
+            )
 
     async def _synthesize_gpt_sovits(self, text: str) -> bytes:
         if not self.gpt_sovits_ref_audio.is_file():
@@ -646,6 +825,9 @@ class VoiceState:
     device_vad_available: bool = False
     device_vad_speaking: bool = False
     suppressed_background_frames: int = 0
+    silero_vad_ready: bool = False
+    silero_vad_speaking: bool = False
+    endpoint_reason: str | None = None
     latency_ms: dict[str, float] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -678,6 +860,9 @@ class VoiceState:
             "suppressed_background_frames": (
                 self.suppressed_background_frames
             ),
+            "silero_vad_ready": self.silero_vad_ready,
+            "silero_vad_speaking": self.silero_vad_speaking,
+            "endpoint_reason": self.endpoint_reason,
             "latency_ms": self.latency_ms,
             "updated_at": self.updated_at,
         }
@@ -723,6 +908,19 @@ class VoiceSessionManager:
         ) = None
         self._child_voice_classifier = ChildVoiceClassifier(
             minimum_pitch_hz=settings.child_identity_minimum_pitch_hz
+        )
+        self._silero_vad: SileroSpeechDetector | None = None
+        if (
+            settings.voice_silero_vad_enabled
+            and settings.voice_silero_vad_model.is_file()
+        ):
+            try:
+                self._silero_vad = SileroSpeechDetector(settings)
+                self.state.silero_vad_ready = True
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
+                logger.warning("Silero VAD unavailable: %s", exc)
+        self.latency_tracker = VoiceLatencyTracker(
+            settings.voice_latency_history, settings.voice_latency_max_samples
         )
         self._base_user_id = settings.voice_user_id
         self._lock = asyncio.Lock()
@@ -834,10 +1032,13 @@ class VoiceSessionManager:
             self.state.device_vad_available = False
             self.state.device_vad_speaking = False
             self.state.suppressed_background_frames = 0
+            self.state.endpoint_reason = None
             self.state.latency_ms = {}
             self._clear_audio()
             if self.wake_detector is not None:
                 self.wake_detector.reset()
+            if self._silero_vad is not None:
+                self._silero_vad.reset()
             self._history.clear()
             self._ignore_audio_until = time.monotonic() + 0.35
         try:
@@ -945,6 +1146,14 @@ class VoiceSessionManager:
                 evidence = self._classify_wake_audio()
                 await self._acknowledge_wake_word(evidence)
                 return
+        # A real streaming KWS detector is the only standby pipeline. Full
+        # utterance capture and Whisper are enabled only after the wake event.
+        if (
+            self.state.mode == VoiceMode.WAITING_FOR_WAKE_WORD
+            and not self.state.awake
+            and self.wake_detector is not None
+        ):
+            return
         if kws_only:
             return
         now = time.monotonic()
@@ -959,6 +1168,12 @@ class VoiceSessionManager:
             self.settings.voice_device_vad_enabled
             and self.state.device_vad_available
         )
+        silero_speech = (
+            self._silero_vad.accept_pcm(pcm)
+            if self._silero_vad is not None
+            else False
+        )
+        self.state.silero_vad_speaking = silero_speech
         servo_noise_active = now < self._servo_noise_until
         if servo_noise_active and not self._speaking_detected:
             # Servo motion is a deterministic local noise source and can fool
@@ -976,9 +1191,12 @@ class VoiceSessionManager:
         start_threshold = min(1100, max(280, round(self._noise_rms * 3.0)))
         continue_threshold = min(700, max(170, round(self._noise_rms * 1.7)))
         speech_threshold = continue_threshold if self._speaking_detected else start_threshold
-        speech_frame = rms >= speech_threshold and (
-            not device_vad_authoritative or device_speech
+        acoustic_human_speech = (
+            silero_speech
+            if self._silero_vad is not None
+            else (device_speech if device_vad_authoritative else True)
         )
+        speech_frame = rms >= speech_threshold and acoustic_human_speech
         if (
             self._speaking_detected
             and device_vad_authoritative
@@ -1005,9 +1223,13 @@ class VoiceSessionManager:
                 else self.settings.voice_silence_ms
             )
             if self._silence_ms >= required_silence_ms:
-                self._finish_utterance()
+                self._finish_utterance(
+                    "device_vad_end"
+                    if device_vad_authoritative and not device_speech
+                    else "adaptive_silence"
+                )
         if len(self._utterance) * 60 >= self.settings.voice_max_speech_seconds * 1000:
-            self._finish_utterance()
+            self._finish_utterance("maximum_duration")
 
     async def voice_activity(self, speaking: bool) -> None:
         self.state.device_vad_available = True
@@ -1032,8 +1254,9 @@ class VoiceSessionManager:
         await self._task
         return self.state.snapshot()
 
-    def _finish_utterance(self) -> None:
+    def _finish_utterance(self, endpoint_reason: str = "voice_activity_end") -> None:
         duration_ms = len(self._utterance) * 60
+        endpoint_ms = float(self._silence_ms)
         pcm = b"".join(self._utterance)
         self._clear_audio()
         if duration_ms < self.settings.voice_min_speech_ms or not pcm:
@@ -1044,7 +1267,10 @@ class VoiceSessionManager:
         self.state.transcript = None
         self.state.response_text = None
         self.state.error = None
-        self._task = asyncio.create_task(self._run_turn(None, pcm))
+        self.state.endpoint_reason = endpoint_reason
+        self._task = asyncio.create_task(
+            self._run_turn(None, pcm, endpoint_ms=endpoint_ms)
+        )
 
     async def _run_turn(
         self,
@@ -1052,12 +1278,21 @@ class VoiceSessionManager:
         pcm: bytes | None,
         *,
         enforce_wake: bool = True,
+        endpoint_ms: float | None = None,
     ) -> None:
         microphone_paused = False
         sleep_after_reply = False
         wake_only_ack = False
         turn_started = time.perf_counter()
         self.state.latency_ms = {}
+        if endpoint_ms is not None:
+            self.state.latency_ms["endpoint_wait"] = round(endpoint_ms, 1)
+        if self.state.awake and self.state.wake_detected_at is not None:
+            elapsed = (
+                datetime.now(timezone.utc) - self.state.wake_detected_at
+            ).total_seconds() * 1000
+            if 0 <= elapsed <= self.settings.voice_wake_session_seconds * 1000:
+                self.state.latency_ms["wake_to_command"] = round(elapsed, 1)
         try:
             self._ensure_provider()
             assert self.provider is not None
@@ -1107,6 +1342,7 @@ class VoiceSessionManager:
             instructions = self._instructions()
             answer = ""
             first_segment = True
+            first_audio_chunk = True
             async for segment in self._response_segments(
                 instructions, transcript, direct_answer
             ):
@@ -1115,16 +1351,11 @@ class VoiceSessionManager:
                     continue
                 if first_segment:
                     self._record_latency("first_text", turn_started)
-                speech_pcm = (
+                cached_pcm = (
                     self._load_wake_ack_pcm()
                     if wake_only_ack and first_segment
                     else None
                 )
-                if speech_pcm is None:
-                    speech_pcm = await self.provider.synthesize(segment)
-                if first_segment:
-                    self._record_latency("first_audio_ready", turn_started)
-                speech_pcm = self._maximize_speech_pcm(speech_pcm)
                 if not microphone_paused:
                     self._set_mode(VoiceMode.SPEAKING)
                     await self._show_speaking_frame(0)
@@ -1144,32 +1375,39 @@ class VoiceSessionManager:
                     MessageType.TEXT_MESSAGE,
                     {"name": "爱莉", "content": answer[:240]},
                 )
-                assert self.codec is not None
-                packets = self.codec.encode_speech(speech_pcm)
-                frame_bytes = (
-                    OpusCodec.SPEECH_SAMPLE_RATE
-                    * OpusCodec.SPEECH_FRAME_DURATION_MS
-                    // 1000
-                    * 2
-                )
-                avatar_interval_frames = max(
-                    1, round(100 / OpusCodec.SPEECH_FRAME_DURATION_MS)
-                )
-                for packet_index, packet in enumerate(packets):
-                    if packet_index % avatar_interval_frames == 0:
-                        start = packet_index * frame_bytes
-                        end = min(
-                            len(speech_pcm),
-                            (packet_index + avatar_interval_frames) * frame_bytes,
+                async for speech_pcm in self._speech_chunks(segment, cached_pcm):
+                    if first_audio_chunk:
+                        self._record_latency("first_audio_ready", turn_started)
+                        first_audio_chunk = False
+                    speech_pcm = self._maximize_speech_pcm(speech_pcm)
+                    assert self.codec is not None
+                    packets = self.codec.encode_speech(speech_pcm)
+                    frame_bytes = (
+                        OpusCodec.SPEECH_SAMPLE_RATE
+                        * OpusCodec.SPEECH_FRAME_DURATION_MS
+                        // 1000
+                        * 2
+                    )
+                    avatar_interval_frames = max(
+                        1, round(100 / OpusCodec.SPEECH_FRAME_DURATION_MS)
+                    )
+                    for packet_index, packet in enumerate(packets):
+                        if packet_index % avatar_interval_frames == 0:
+                            start = packet_index * frame_bytes
+                            end = min(
+                                len(speech_pcm),
+                                (packet_index + avatar_interval_frames) * frame_bytes,
+                            )
+                            await self._show_speaking_frame(
+                                self._mouth_level(speech_pcm[start:end])
+                            )
+                        await self.gateway.send(MessageType.OPUS, packet)
+                        if first_segment:
+                            self._record_latency("first_audio_sent", turn_started)
+                            first_segment = False
+                        await asyncio.sleep(
+                            OpusCodec.SPEECH_FRAME_DURATION_MS / 1000
                         )
-                        await self._show_speaking_frame(
-                            self._mouth_level(speech_pcm[start:end])
-                        )
-                    await self.gateway.send(MessageType.OPUS, packet)
-                    if first_segment:
-                        self._record_latency("first_audio_sent", turn_started)
-                        first_segment = False
-                    await asyncio.sleep(OpusCodec.SPEECH_FRAME_DURATION_MS / 1000)
             await self._show_speaking_frame(0)
             if not answer:
                 raise VoiceError("DeepSeek returned no spoken text")
@@ -1195,6 +1433,11 @@ class VoiceSessionManager:
                 self._activate_wake_session()
             self.state.error = None
             self._record_latency("turn_total", turn_started)
+            self.latency_tracker.record(
+                self.state.latency_ms,
+                success=True,
+                endpoint_reason=self.state.endpoint_reason or "text_input",
+            )
             logger.info("voice turn latency_ms=%s", self.state.latency_ms)
             self._set_mode(self._idle_mode())
             await self._show_avatar("listening" if self.state.awake else "neutral")
@@ -1221,6 +1464,12 @@ class VoiceSessionManager:
                 await self._show_avatar("concerned")
             else:
                 self._set_mode(VoiceMode.ERROR)
+            self._record_latency("turn_total", turn_started)
+            self.latency_tracker.record(
+                self.state.latency_ms,
+                success=False,
+                endpoint_reason=self.state.endpoint_reason or "unknown",
+            )
         finally:
             if microphone_paused and self.state.enabled and await self.gateway.is_online():
                 self._clear_audio()
@@ -1251,6 +1500,25 @@ class VoiceSessionManager:
         yield await self.provider.answer(
             instructions, transcript, list(self._history)
         )
+
+    async def _speech_chunks(
+        self, text: str, cached_pcm: bytes | None
+    ) -> AsyncIterator[bytes]:
+        assert self.provider is not None
+        if cached_pcm is not None:
+            yield cached_pcm
+            return
+        stream = getattr(self.provider, "synthesize_stream", None)
+        if stream is not None:
+            yielded = False
+            async for chunk in stream(text):
+                if chunk:
+                    yielded = True
+                    yield chunk
+            if not yielded:
+                raise VoiceError("speech synthesis returned no streamed audio")
+            return
+        yield await self.provider.synthesize(text)
 
     @staticmethod
     def _clean_spoken_answer(text: str) -> str:
