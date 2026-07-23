@@ -4,6 +4,7 @@ from stackchan_control.avatar import (
     ANIMATION_FILES,
     AVATAR_FILES,
     AvatarController,
+    IDLE_GESTURES,
     validate_esp_avatar,
 )
 from stackchan_control.gateway import MessageType
@@ -49,3 +50,34 @@ def test_emotion_change_uses_three_blink_transition_frames():
         MessageType.JPEG,
         MessageType.VIDEO_MODE_ON,
     ]
+
+
+def test_idle_gesture_returns_to_neutral():
+    gateway = RecordingGateway()
+    controller = AvatarController(
+        gateway, PROJECT_ROOT / "assets/avatars/elysia/v1"
+    )
+
+    async def run():
+        await controller.show("neutral")
+        gateway.messages.clear()
+        return await controller.play_idle_gesture("hair_touch")
+
+    assert asyncio.run(run()) is True
+    assert controller.current_emotion == "neutral"
+    assert len(gateway.messages) == len(IDLE_GESTURES["hair_touch"]) * 2
+
+
+def test_idle_gesture_does_not_override_non_idle_expression():
+    gateway = RecordingGateway()
+    controller = AvatarController(
+        gateway, PROJECT_ROOT / "assets/avatars/elysia/v1"
+    )
+
+    async def run():
+        await controller.show("thinking")
+        gateway.messages.clear()
+        return await controller.play_idle_gesture("blink")
+
+    assert asyncio.run(run()) is False
+    assert gateway.messages == []

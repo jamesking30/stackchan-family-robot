@@ -7,6 +7,7 @@ import ctypes.util
 import io
 import json
 import logging
+import random
 import re
 import shutil
 import tempfile
@@ -665,6 +666,7 @@ class VoiceSessionManager:
         self._wake_deadline: float | None = None
         self._history: deque[dict[str, str]] = deque(maxlen=12)
         self._task: asyncio.Task[None] | None = None
+        self._idle_animation_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     def _ensure_codec(self) -> None:
@@ -1144,6 +1146,67 @@ class VoiceSessionManager:
     def _set_mode(self, mode: VoiceMode) -> None:
         self.state.mode = mode
         self.state.updated_at = datetime.now(timezone.utc)
+        if (
+            mode == VoiceMode.WAITING_FOR_WAKE_WORD
+            and self.state.enabled
+            and self.settings.avatar_idle_animation_enabled
+        ):
+            self._start_idle_animation()
+        else:
+            self._stop_idle_animation()
+
+    def _start_idle_animation(self) -> None:
+        if self.avatar_controller is None or (
+            self._idle_animation_task is not None
+            and not self._idle_animation_task.done()
+        ):
+            return
+        try:
+            self._idle_animation_task = asyncio.create_task(
+                self._idle_animation_loop()
+            )
+        except RuntimeError:
+            self._idle_animation_task = None
+
+    def _stop_idle_animation(self) -> None:
+        task = self._idle_animation_task
+        self._idle_animation_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _idle_animation_loop(self) -> None:
+        gestures = ("blink", "look_left", "look_right", "hair_touch")
+        weights = (0.55, 0.15, 0.15, 0.15)
+        minimum, maximum = sorted(
+            (
+                max(1.0, self.settings.avatar_idle_min_seconds),
+                max(1.0, self.settings.avatar_idle_max_seconds),
+            )
+        )
+        current_task = asyncio.current_task()
+        try:
+            while (
+                self.state.enabled
+                and self.state.mode == VoiceMode.WAITING_FOR_WAKE_WORD
+            ):
+                await asyncio.sleep(random.uniform(minimum, maximum))
+                if (
+                    not self.state.enabled
+                    or self.state.mode != VoiceMode.WAITING_FOR_WAKE_WORD
+                ):
+                    break
+                if not await self.gateway.is_online():
+                    continue
+                assert self.avatar_controller is not None
+                gesture = random.choices(gestures, weights=weights, k=1)[0]
+                await self.avatar_controller.play_idle_gesture(gesture)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("idle avatar animation stopped: %s", exc)
+        finally:
+            if self._idle_animation_task is current_task:
+                self._idle_animation_task = None
 
     def _record_latency(self, stage: str, started: float) -> None:
         self.state.latency_ms[stage] = round(

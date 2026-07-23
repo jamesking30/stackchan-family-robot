@@ -23,6 +23,9 @@ class Settings:
     web_dir: Path
     avatar_assets_dir: Path = PROJECT_ROOT / "assets/avatars/elysia/v1"
     avatar_voice_enabled: bool = False
+    avatar_idle_animation_enabled: bool = True
+    avatar_idle_min_seconds: float = 4.5
+    avatar_idle_max_seconds: float = 9.5
     admin_api_key: str | None = None
     device_api_key: str | None = None
     device_id: str = "stackchan-home-01"
@@ -107,6 +110,16 @@ class Settings:
                 "ROBOT_AVATAR_VOICE_ENABLED", "true"
             ).lower()
             in {"1", "true", "yes", "on"},
+            avatar_idle_animation_enabled=os.getenv(
+                "ROBOT_AVATAR_IDLE_ANIMATION_ENABLED", "true"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            avatar_idle_min_seconds=float(
+                os.getenv("ROBOT_AVATAR_IDLE_MIN_SECONDS", "4.5")
+            ),
+            avatar_idle_max_seconds=float(
+                os.getenv("ROBOT_AVATAR_IDLE_MAX_SECONDS", "9.5")
+            ),
             admin_api_key=os.getenv("ROBOT_ADMIN_API_KEY") or None,
             device_api_key=os.getenv("ROBOT_DEVICE_API_KEY") or None,
             device_id=os.getenv("STACKCHAN_DEVICE_ID", "stackchan-home-01"),

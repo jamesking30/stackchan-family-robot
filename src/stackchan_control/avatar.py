@@ -33,6 +33,39 @@ ANIMATION_FILES = {
     "speaking_open": "speaking-open.jpg",
     "transition_half_blink": "transition-half-blink.jpg",
     "transition_blink": "transition-blink.jpg",
+    "idle_look_left": "idle-look-left.jpg",
+    "idle_look_right": "idle-look-right.jpg",
+    "idle_hair_touch_1": "idle-hair-touch-1.jpg",
+    "idle_hair_touch_2": "idle-hair-touch-2.jpg",
+}
+
+IDLE_GESTURES = {
+    "blink": (
+        ("transition_half_blink", 0.045),
+        ("transition_blink", 0.070),
+        ("transition_half_blink", 0.045),
+        ("speaking_closed", 0.0),
+    ),
+    "look_left": (
+        ("transition_half_blink", 0.045),
+        ("transition_blink", 0.060),
+        ("idle_look_left", 0.500),
+        ("transition_half_blink", 0.045),
+        ("speaking_closed", 0.0),
+    ),
+    "look_right": (
+        ("transition_half_blink", 0.045),
+        ("transition_blink", 0.060),
+        ("idle_look_right", 0.500),
+        ("transition_half_blink", 0.045),
+        ("speaking_closed", 0.0),
+    ),
+    "hair_touch": (
+        ("idle_hair_touch_1", 0.120),
+        ("idle_hair_touch_2", 0.280),
+        ("idle_hair_touch_1", 0.120),
+        ("speaking_closed", 0.0),
+    ),
 }
 
 
@@ -142,6 +175,20 @@ class AvatarController:
         async with self._frame_lock:
             await self._send_frame(ANIMATION_FILES[frame])
             self.current_emotion = "speaking"
+
+    async def play_idle_gesture(self, gesture: str) -> bool:
+        sequence = IDLE_GESTURES.get(gesture)
+        if sequence is None:
+            raise ValueError(f"unknown idle gesture: {gesture}")
+        async with self._frame_lock:
+            if self.current_emotion != "neutral":
+                return False
+            for frame, duration in sequence:
+                await self._send_frame(ANIMATION_FILES[frame])
+                if duration:
+                    await asyncio.sleep(duration)
+            self.current_emotion = "neutral"
+        return True
 
     async def hide(self) -> None:
         async with self._frame_lock:
