@@ -34,6 +34,7 @@ class Settings:
     voice_auto_start: bool = False
     voice_user_id: str = "user-2"
     voice_whisper_binary: str = "whisper-cli"
+    voice_whisper_server_url: str = "http://127.0.0.1:8767"
     voice_whisper_model: Path = PROJECT_ROOT / "var/models/ggml-small.bin"
     voice_zh_name: str = "Tingting"
     voice_en_name: str = "Samantha"
@@ -113,6 +114,9 @@ class Settings:
             voice_whisper_binary=os.getenv(
                 "ROBOT_VOICE_WHISPER_BINARY", "whisper-cli"
             ),
+            voice_whisper_server_url=os.getenv(
+                "ROBOT_VOICE_WHISPER_SERVER_URL", "http://127.0.0.1:8767"
+            ).rstrip("/"),
             voice_whisper_model=project_path(
                 os.getenv(
                     "ROBOT_VOICE_WHISPER_MODEL",

@@ -80,6 +80,29 @@ class FakeGptSovitsClient:
         )
 
 
+class FakeWhisperServerClient:
+    request_files: dict[str, tuple[str, bytes, str]] | None = None
+    request_data: dict[str, str] | None = None
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def post(self, url: str, **kwargs):
+        type(self).request_files = kwargs["files"]
+        type(self).request_data = kwargs["data"]
+        return httpx.Response(
+            200,
+            json={"text": "爱莉你好\n"},
+            request=httpx.Request("POST", url),
+        )
+
+
 def test_resolve_local_executable_uses_homebrew_when_path_is_minimal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -147,9 +170,44 @@ def test_local_whisper_rejects_silence_and_out_of_scope_hallucinations(text: str
         LocalDeepSeekVoiceProvider._clean_transcript(text)
 
 
+def test_persistent_whisper_server_reuses_loaded_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    model_path = tmp_path / "ggml-small.bin"
+    model_path.write_bytes(b"model")
+    monkeypatch.setattr("stackchan_control.voice.shutil.which", lambda _: "/usr/bin/tool")
+    monkeypatch.setattr(
+        "stackchan_control.voice.httpx.AsyncClient", FakeWhisperServerClient
+    )
+    settings = Settings(
+        db_path=tmp_path / "voice.db",
+        seed_character_dir=PROJECT_ROOT / "config" / "seed_character",
+        web_dir=PROJECT_ROOT / "web",
+        deepseek_api_key="secret",
+        voice_whisper_model=model_path,
+    )
+
+    transcript = asyncio.run(
+        LocalDeepSeekVoiceProvider(settings).transcribe(b"RIFF-fake-wav")
+    )
+
+    assert transcript == "爱莉你好"
+    assert FakeWhisperServerClient.request_data == {
+        "response_format": "json",
+        "language": "auto",
+        "temperature": "0.0",
+    }
+
+
 def test_local_whisper_accepts_chinese_and_english():
     assert LocalDeepSeekVoiceProvider._clean_transcript("  你好， StackChan  ") == "你好， StackChan"
     assert LocalDeepSeekVoiceProvider._clean_transcript("HelloHello") == "Hello"
+
+
+@pytest.mark.parametrize("text", ["( 開箱 )", "（环境音乐）", "[music]"])
+def test_local_whisper_rejects_parenthesized_sound_descriptions(text: str):
+    with pytest.raises(NoSpeechDetected):
+        LocalDeepSeekVoiceProvider._clean_transcript(text)
 
 
 def test_local_whisper_rejects_repeated_out_of_scope_characters():

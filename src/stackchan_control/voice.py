@@ -95,6 +95,7 @@ class LocalDeepSeekVoiceProvider:
         self.base_url = settings.deepseek_base_url.rstrip("/")
         self.model = settings.deepseek_model
         self.whisper_binary = resolve_local_executable(settings.voice_whisper_binary)
+        self.whisper_server_url = settings.voice_whisper_server_url
         self.say_binary = resolve_local_executable("say")
         self.ffmpeg_binary = resolve_local_executable("ffmpeg")
         self.whisper_model = settings.voice_whisper_model
@@ -121,6 +122,34 @@ class LocalDeepSeekVoiceProvider:
         return {"Authorization": f"Bearer {self.api_key}"}
 
     async def transcribe(self, wav_audio: bytes) -> str:
+        if self.whisper_server_url:
+            try:
+                return await self._transcribe_with_server(wav_audio)
+            except (httpx.HTTPError, VoiceError, ValueError) as exc:
+                logger.warning(
+                    "persistent Whisper unavailable; using CLI fallback: %s", exc
+                )
+        return await self._transcribe_with_cli(wav_audio)
+
+    async def _transcribe_with_server(self, wav_audio: bytes) -> str:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{self.whisper_server_url}/inference",
+                files={"file": ("utterance.wav", wav_audio, "audio/wav")},
+                data={
+                    "response_format": "json",
+                    "language": "auto",
+                    "temperature": "0.0",
+                },
+            )
+        if not response.is_success:
+            raise VoiceError(
+                f"persistent Whisper failed with HTTP {response.status_code}"
+            )
+        body = response.json()
+        return self._clean_transcript(str(body.get("text", "")))
+
+    async def _transcribe_with_cli(self, wav_audio: bytes) -> str:
         with tempfile.TemporaryDirectory(prefix="stackchan-whisper-") as temp_dir:
             temp_path = Path(temp_dir)
             input_path = temp_path / "utterance.wav"
@@ -169,6 +198,7 @@ class LocalDeepSeekVoiceProvider:
         if (
             not compact
             or compact.upper() in {"[BLANK_AUDIO]", "[NO SPEECH]", "(BLANK AUDIO)"}
+            or re.fullmatch(r"[\(\（\[].{1,40}[\)\）\]]", compact)
             or re.search(r"[\uac00-\ud7af]", compact)
             or re.search(r"字幕.{0,4}(製作|制作|提供)", compact)
             or not re.search(r"[A-Za-z0-9\u3400-\u9fff]", compact)

@@ -4,12 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TTS_PID=""
 GPT_SOVITS_PID=""
+WHISPER_PID=""
 ROBOT_PID=""
 
 cleanup() {
   [[ -n "$ROBOT_PID" ]] && kill "$ROBOT_PID" 2>/dev/null || true
   [[ -n "$TTS_PID" ]] && kill "$TTS_PID" 2>/dev/null || true
   [[ -n "$GPT_SOVITS_PID" ]] && kill "$GPT_SOVITS_PID" 2>/dev/null || true
+  [[ -n "$WHISPER_PID" ]] && kill "$WHISPER_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -34,8 +36,23 @@ start_gpt_sovits() {
   fi
 }
 
+start_whisper() {
+  if curl --fail --silent --max-time 1 http://127.0.0.1:8767/ >/dev/null 2>&1; then
+    WHISPER_PID=""
+    return
+  fi
+  /opt/homebrew/bin/whisper-server \
+    -m "$ROOT_DIR/var/models/ggml-small.bin" \
+    --host 127.0.0.1 \
+    --port 8767 \
+    -l auto \
+    -t 6 &
+  WHISPER_PID=$!
+}
+
 start_qwen
 start_gpt_sovits
+start_whisper
 
 for _ in {1..40}; do
   if curl --fail --silent http://127.0.0.1:8766/v1/models >/dev/null 2>&1; then
@@ -44,8 +61,20 @@ for _ in {1..40}; do
   sleep 0.25
 done
 
+for _ in {1..80}; do
+  if curl --fail --silent --max-time 1 http://127.0.0.1:8767/ >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+
 if ! curl --fail --silent http://127.0.0.1:8766/v1/models >/dev/null; then
   echo "Local TTS service did not become ready." >&2
+  exit 1
+fi
+
+if ! curl --fail --silent http://127.0.0.1:8767/ >/dev/null; then
+  echo "Persistent Whisper service did not become ready." >&2
   exit 1
 fi
 
@@ -64,6 +93,12 @@ while kill -0 "$ROBOT_PID" 2>/dev/null; do
   elif [[ -z "$GPT_SOVITS_PID" ]] && ! curl --fail --silent --max-time 1 \
     http://127.0.0.1:9880/docs >/dev/null 2>&1; then
     start_gpt_sovits
+  fi
+  if [[ -n "$WHISPER_PID" ]] && ! kill -0 "$WHISPER_PID" 2>/dev/null; then
+    start_whisper
+  elif [[ -z "$WHISPER_PID" ]] && ! curl --fail --silent --max-time 1 \
+    http://127.0.0.1:8767/ >/dev/null 2>&1; then
+    start_whisper
   fi
   sleep 5
 done
