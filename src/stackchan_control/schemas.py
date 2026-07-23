@@ -218,6 +218,10 @@ class VoiceStateResponse(BaseModel):
     last_wake_child_voice: bool | None = None
     last_wake_pitch_hz: float | None = None
     last_wake_voiced_ratio: float | None = None
+    kws_processed_frames: int = 0
+    kws_input_rms: int = 0
+    kws_input_peak_rms: int = 0
+    kws_applied_gain: float = 1.0
     last_heard_transcript: str | None = None
     speaker_identity: str | None = None
     speaker_identity_confidence: float | None = None

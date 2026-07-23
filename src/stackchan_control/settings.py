@@ -161,6 +161,9 @@ class Settings:
     )
     voice_kws_score: float = 2.0
     voice_kws_threshold: float = 0.20
+    voice_kws_target_rms: int = 2800
+    voice_kws_max_gain: float = 4.0
+    voice_kws_min_gain_rms: int = 80
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -544,5 +547,14 @@ class Settings:
             voice_kws_score=float(os.getenv("ROBOT_VOICE_KWS_SCORE", "3.0")),
             voice_kws_threshold=float(
                 os.getenv("ROBOT_VOICE_KWS_THRESHOLD", "0.12")
+            ),
+            voice_kws_target_rms=int(
+                os.getenv("ROBOT_VOICE_KWS_TARGET_RMS", "2800")
+            ),
+            voice_kws_max_gain=float(
+                os.getenv("ROBOT_VOICE_KWS_MAX_GAIN", "4.0")
+            ),
+            voice_kws_min_gain_rms=int(
+                os.getenv("ROBOT_VOICE_KWS_MIN_GAIN_RMS", "80")
             ),
         )

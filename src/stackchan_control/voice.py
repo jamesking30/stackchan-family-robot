@@ -812,6 +812,10 @@ class VoiceState:
     last_wake_child_voice: bool | None = None
     last_wake_pitch_hz: float | None = None
     last_wake_voiced_ratio: float | None = None
+    kws_processed_frames: int = 0
+    kws_input_rms: int = 0
+    kws_input_peak_rms: int = 0
+    kws_applied_gain: float = 1.0
     last_heard_transcript: str | None = None
     speaker_identity: str | None = None
     speaker_identity_confidence: float | None = None
@@ -845,6 +849,10 @@ class VoiceState:
             "last_wake_child_voice": self.last_wake_child_voice,
             "last_wake_pitch_hz": self.last_wake_pitch_hz,
             "last_wake_voiced_ratio": self.last_wake_voiced_ratio,
+            "kws_processed_frames": self.kws_processed_frames,
+            "kws_input_rms": self.kws_input_rms,
+            "kws_input_peak_rms": self.kws_input_peak_rms,
+            "kws_applied_gain": self.kws_applied_gain,
             "last_heard_transcript": self.last_heard_transcript,
             "speaker_identity": self.speaker_identity,
             "speaker_identity_confidence": self.speaker_identity_confidence,
@@ -1018,6 +1026,10 @@ class VoiceSessionManager:
             self.state.last_wake_child_voice = None
             self.state.last_wake_pitch_hz = None
             self.state.last_wake_voiced_ratio = None
+            self.state.kws_processed_frames = 0
+            self.state.kws_input_rms = 0
+            self.state.kws_input_peak_rms = 0
+            self.state.kws_applied_gain = 1.0
             self.state.last_heard_transcript = None
             self._wake_deadline = None
             self._set_mode(self._idle_mode())
@@ -1119,9 +1131,26 @@ class VoiceSessionManager:
         self._ensure_codec()
         assert self.codec is not None
         pcm = self.codec.decode_microphone(payload)
+        rms = audioop.rms(pcm, 2)
+        self.state.audio_rms = rms
+        self.state.audio_peak_rms = max(self.state.audio_peak_rms, rms)
         self._wake_audio.append(pcm)
         if self.wake_detector is not None:
             keyword = self.wake_detector.accept_pcm(pcm)
+            self.state.kws_processed_frames = int(
+                getattr(self.wake_detector, "processed_frames", 0)
+            )
+            self.state.kws_input_rms = int(
+                getattr(self.wake_detector, "last_input_rms", rms)
+            )
+            self.state.kws_input_peak_rms = max(
+                self.state.kws_input_peak_rms,
+                self.state.kws_input_rms,
+            )
+            self.state.kws_applied_gain = round(
+                float(getattr(self.wake_detector, "last_applied_gain", 1.0)),
+                2,
+            )
             if keyword:
                 if self._task is not None and not self._task.done():
                     task = self._task
@@ -1157,9 +1186,6 @@ class VoiceSessionManager:
         if kws_only:
             return
         now = time.monotonic()
-        rms = audioop.rms(pcm, 2)
-        self.state.audio_rms = rms
-        self.state.audio_peak_rms = max(self.state.audio_peak_rms, rms)
         device_speech = (
             self.state.device_vad_speaking
             or now < self._device_vad_speech_until

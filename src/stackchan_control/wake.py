@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+import audioop
 from array import array
 from pathlib import Path
 from typing import Protocol
@@ -13,6 +14,9 @@ from .settings import Settings
 
 class WakeWordDetector(Protocol):
     last_frame_latency_ms: float
+    last_input_rms: int
+    last_applied_gain: float
+    processed_frames: int
 
     def accept_pcm(self, pcm: bytes) -> str | None: ...
 
@@ -47,11 +51,25 @@ class SherpaWakeWordDetector:
         )
         self._stream = self._spotter.create_stream()
         self.last_frame_latency_ms = 0.0
+        self.last_input_rms = 0
+        self.last_applied_gain = 1.0
+        self.processed_frames = 0
+        self._target_rms = settings.voice_kws_target_rms
+        self._max_gain = settings.voice_kws_max_gain
+        self._min_gain_rms = settings.voice_kws_min_gain_rms
 
     def accept_pcm(self, pcm: bytes) -> str | None:
         if not pcm:
             return None
         started = time.perf_counter()
+        self.processed_frames += 1
+        self.last_input_rms = audioop.rms(pcm, 2)
+        self.last_applied_gain = 1.0
+        if self._min_gain_rms <= self.last_input_rms < self._target_rms:
+            self.last_applied_gain = min(
+                self._max_gain, self._target_rms / self.last_input_rms
+            )
+            pcm = audioop.mul(pcm, 2, self.last_applied_gain)
         samples = array("h")
         samples.frombytes(pcm)
         if sys.byteorder != "little":
