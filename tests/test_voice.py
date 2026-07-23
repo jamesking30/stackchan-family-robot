@@ -312,6 +312,15 @@ def test_synthesized_speech_is_peak_normalized_to_full_scale():
     ) <= 32700
 
 
+def test_mouth_level_tracks_speech_energy():
+    def pcm(sample: int) -> bytes:
+        return sample.to_bytes(2, "little", signed=True) * 2400
+
+    assert VoiceSessionManager._mouth_level(pcm(0)) == 0
+    assert VoiceSessionManager._mouth_level(pcm(2000)) == 1
+    assert VoiceSessionManager._mouth_level(pcm(9000)) == 2
+
+
 def test_cached_wake_ack_is_loaded_from_runtime_cache(tmp_path: Path):
     cached_pcm = b"\x01\x00" * 320
     ack_path = tmp_path / "wake-ack-v2.wav"

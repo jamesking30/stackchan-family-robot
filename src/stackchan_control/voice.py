@@ -938,7 +938,7 @@ class VoiceSessionManager:
                 speech_pcm = self._maximize_speech_pcm(speech_pcm)
                 if not microphone_paused:
                     self._set_mode(VoiceMode.SPEAKING)
-                    await self._show_avatar("happy")
+                    await self._show_speaking_frame(0)
                     await self.gateway.send(MessageType.STOP_AUDIO_STREAM)
                     microphone_paused = True
                     self._clear_audio()
@@ -956,12 +956,32 @@ class VoiceSessionManager:
                     {"name": "爱莉", "content": answer[:240]},
                 )
                 assert self.codec is not None
-                for packet in self.codec.encode_speech(speech_pcm):
+                packets = self.codec.encode_speech(speech_pcm)
+                frame_bytes = (
+                    OpusCodec.SPEECH_SAMPLE_RATE
+                    * OpusCodec.SPEECH_FRAME_DURATION_MS
+                    // 1000
+                    * 2
+                )
+                avatar_interval_frames = max(
+                    1, round(100 / OpusCodec.SPEECH_FRAME_DURATION_MS)
+                )
+                for packet_index, packet in enumerate(packets):
+                    if packet_index % avatar_interval_frames == 0:
+                        start = packet_index * frame_bytes
+                        end = min(
+                            len(speech_pcm),
+                            (packet_index + avatar_interval_frames) * frame_bytes,
+                        )
+                        await self._show_speaking_frame(
+                            self._mouth_level(speech_pcm[start:end])
+                        )
                     await self.gateway.send(MessageType.OPUS, packet)
                     if first_segment:
                         self._record_latency("first_audio_sent", turn_started)
                         first_segment = False
                     await asyncio.sleep(OpusCodec.SPEECH_FRAME_DURATION_MS / 1000)
+            await self._show_speaking_frame(0)
             if not answer:
                 raise VoiceError("DeepSeek returned no spoken text")
             if direct_answer is None:
@@ -1166,15 +1186,36 @@ class VoiceSessionManager:
             {"name": "爱莉", "content": "我在，你说吧。"},
         )
         if cached_pcm:
-            for packet in self.codec.encode_speech(cached_pcm):
+            packets = self.codec.encode_speech(cached_pcm)
+            frame_bytes = (
+                OpusCodec.SPEECH_SAMPLE_RATE
+                * OpusCodec.SPEECH_FRAME_DURATION_MS
+                // 1000
+                * 2
+            )
+            avatar_interval_frames = max(
+                1, round(100 / OpusCodec.SPEECH_FRAME_DURATION_MS)
+            )
+            for packet_index, packet in enumerate(packets):
+                if packet_index % avatar_interval_frames == 0:
+                    start = packet_index * frame_bytes
+                    end = min(
+                        len(cached_pcm),
+                        (packet_index + avatar_interval_frames) * frame_bytes,
+                    )
+                    await self._show_speaking_frame(
+                        self._mouth_level(cached_pcm[start:end])
+                    )
                 await self.gateway.send(MessageType.OPUS, packet)
                 await asyncio.sleep(OpusCodec.SPEECH_FRAME_DURATION_MS / 1000)
+            await self._show_speaking_frame(0)
         await asyncio.sleep(0.12)
         await self.gateway.send(MessageType.START_AUDIO_STREAM)
         self._clear_audio()
         self._ignore_audio_until = time.monotonic() + 0.35
         self._activate_wake_session()
         self._set_mode(self._idle_mode())
+        await self._show_avatar("listening")
 
     async def _show_avatar(self, emotion: str) -> None:
         if self.avatar_controller is None:
@@ -1184,6 +1225,28 @@ class VoiceSessionManager:
         except Exception as exc:
             # A missing or transient display asset must never break speech.
             logger.warning("avatar update failed for %s: %s", emotion, exc)
+
+    async def _show_speaking_frame(self, level: int) -> None:
+        if self.avatar_controller is None:
+            return
+        try:
+            await self.avatar_controller.show_speaking_frame(level)
+        except Exception as exc:
+            # Animation is decorative and must never interrupt audio playback.
+            logger.warning(
+                "speaking avatar update failed for level %s: %s", level, exc
+            )
+
+    @staticmethod
+    def _mouth_level(pcm: bytes) -> int:
+        if not pcm:
+            return 0
+        rms = audioop.rms(pcm, 2)
+        if rms < 900:
+            return 0
+        if rms < 5000:
+            return 1
+        return 2
 
     def _clear_audio(self) -> None:
         self._pre_roll.clear()

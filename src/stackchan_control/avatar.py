@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from .gateway import MessageType, StackChanGateway
@@ -24,6 +25,14 @@ AVATAR_ALIASES = {
     "task_running": "thinking",
     "task_complete": "happy",
     "task_failed": "concerned",
+}
+
+ANIMATION_FILES = {
+    "speaking_closed": "neutral.jpg",
+    "speaking_half": "speaking-half.jpg",
+    "speaking_open": "speaking-open.jpg",
+    "transition_half_blink": "transition-half-blink.jpg",
+    "transition_blink": "transition-blink.jpg",
 }
 
 
@@ -75,6 +84,8 @@ class AvatarController:
         self.gateway = gateway
         self.assets_dir = assets_dir
         self.current_emotion: str | None = None
+        self._frame_lock = asyncio.Lock()
+        self._image_cache: dict[str, bytes] = {}
 
     def resolve(self, emotion: str) -> tuple[str, Path]:
         normalized = AVATAR_ALIASES.get(emotion, emotion)
@@ -87,20 +98,52 @@ class AvatarController:
             raise AvatarAssetError(f"avatar asset is missing: {path}")
         return normalized, path
 
-    async def show(self, emotion: str) -> str:
-        normalized, path = self.resolve(emotion)
+    def _load_image(self, filename: str) -> bytes:
+        cached = self._image_cache.get(filename)
+        if cached is not None:
+            return cached
+        path = self.assets_dir / filename
+        if not path.is_file():
+            raise AvatarAssetError(f"avatar asset is missing: {path}")
         image = path.read_bytes()
         try:
             validate_esp_avatar(image)
         except AvatarAssetError as exc:
             raise AvatarAssetError(f"{path}: {exc}") from exc
-        # Load the frame while the overlay is hidden, then reveal it. This avoids
-        # displaying an old expression while the new JPEG is being decoded.
+        self._image_cache[filename] = image
+        return image
+
+    async def _send_frame(self, filename: str) -> None:
+        image = self._load_image(filename)
         await self.gateway.send(MessageType.JPEG, image)
         await self.gateway.send(MessageType.VIDEO_MODE_ON)
-        self.current_emotion = normalized
+
+    async def show(self, emotion: str) -> str:
+        normalized, path = self.resolve(emotion)
+        async with self._frame_lock:
+            if self.current_emotion is not None and self.current_emotion != normalized:
+                for frame in (
+                    "transition_half_blink",
+                    "transition_blink",
+                    "transition_half_blink",
+                ):
+                    await self._send_frame(ANIMATION_FILES[frame])
+                    await asyncio.sleep(0.04)
+            await self._send_frame(path.name)
+            self.current_emotion = normalized
         return normalized
 
+    async def show_speaking_frame(self, level: int) -> None:
+        frame = {
+            0: "speaking_closed",
+            1: "speaking_half",
+            2: "speaking_open",
+        }.get(level, "speaking_half")
+        async with self._frame_lock:
+            await self._send_frame(ANIMATION_FILES[frame])
+            self.current_emotion = "speaking"
+
     async def hide(self) -> None:
-        await self.gateway.send(MessageType.VIDEO_MODE_OFF)
-        self.current_emotion = None
+        async with self._frame_lock:
+            await self.gateway.send(MessageType.VIDEO_MODE_OFF)
+            self.current_emotion = None
