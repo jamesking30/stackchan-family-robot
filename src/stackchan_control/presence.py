@@ -54,6 +54,10 @@ class FaceDetector(Protocol):
     def detect(self, jpeg: bytes) -> list[FaceDetection]: ...
 
 
+class BodyHeadEstimator(Protocol):
+    def estimate_heads(self, jpeg: bytes) -> list[FaceDetection]: ...
+
+
 class FaceAgeClassifier(Protocol):
     def classify(
         self,
@@ -104,6 +108,127 @@ class MediaPipeFaceDetector:
         return detections
 
 
+class MediaPipeBodyHeadEstimator:
+    """Infer a likely head location from locally detected upper-body landmarks."""
+
+    _UPPER_BODY = (11, 12, 13, 14, 15, 16, 23, 24)
+
+    def __init__(self, model_path: Path, min_confidence: float) -> None:
+        if not model_path.is_file():
+            raise FileNotFoundError(
+                f"pose detector model is missing: {model_path}"
+            )
+        options = mp.tasks.vision.PoseLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_path=str(model_path)),
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
+            num_poses=2,
+            min_pose_detection_confidence=min_confidence,
+            min_pose_presence_confidence=min_confidence,
+            min_tracking_confidence=min_confidence,
+            output_segmentation_masks=False,
+        )
+        self._landmarker = (
+            mp.tasks.vision.PoseLandmarker.create_from_options(options)
+        )
+        self._min_confidence = min_confidence
+
+    @staticmethod
+    def _score(landmark: object) -> float:
+        visibility = float(getattr(landmark, "visibility", 1.0) or 0.0)
+        presence = float(getattr(landmark, "presence", 1.0) or 0.0)
+        return min(visibility, presence)
+
+    def estimate_heads(self, jpeg: bytes) -> list[FaceDetection]:
+        encoded = np.frombuffer(jpeg, dtype=np.uint8)
+        bgr = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if bgr is None or bgr.size == 0:
+            return []
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._landmarker.detect(image)
+        estimates: list[FaceDetection] = []
+        for landmarks in result.pose_landmarks:
+            estimate = self._estimate_one(landmarks)
+            if estimate is not None:
+                estimates.append(estimate)
+        return estimates
+
+    def _estimate_one(self, landmarks: list[object]) -> FaceDetection | None:
+        nose = landmarks[0]
+        nose_score = self._score(nose)
+        left_shoulder = landmarks[11]
+        right_shoulder = landmarks[12]
+        left_score = self._score(left_shoulder)
+        right_score = self._score(right_shoulder)
+
+        if (
+            left_score >= self._min_confidence
+            and right_score >= self._min_confidence
+        ):
+            shoulder_width = abs(
+                float(left_shoulder.x) - float(right_shoulder.x)
+            )
+            if shoulder_width < 0.035:
+                return None
+            shoulder_x = (
+                float(left_shoulder.x) + float(right_shoulder.x)
+            ) / 2
+            shoulder_y = (
+                float(left_shoulder.y) + float(right_shoulder.y)
+            ) / 2
+            center_x = (
+                float(nose.x)
+                if nose_score >= self._min_confidence
+                else shoulder_x
+            )
+            center_y = (
+                float(nose.y)
+                if nose_score >= self._min_confidence
+                else shoulder_y - shoulder_width * 0.58
+            )
+            confidence = min(0.92, (left_score + right_score) / 2)
+            width = max(0.08, min(0.34, shoulder_width * 0.52))
+            return FaceDetection(
+                center_x=max(-0.25, min(1.25, center_x)),
+                center_y=max(-0.30, min(1.20, center_y)),
+                width=width,
+                height=min(0.42, width * 1.25),
+                confidence=confidence,
+            )
+
+        # A partly cropped person may expose only arms/chest. MediaPipe uses
+        # those landmarks to recover the pose; use a conservative median as a
+        # directional hint, never as a confirmed face.
+        visible = [
+            landmarks[index]
+            for index in self._UPPER_BODY
+            if self._score(landmarks[index]) >= self._min_confidence
+        ]
+        if len(visible) < 3:
+            return None
+        xs = sorted(float(item.x) for item in visible)
+        ys = sorted(float(item.y) for item in visible)
+        span_x = max(xs) - min(xs)
+        span_y = max(ys) - min(ys)
+        if max(span_x, span_y) < 0.08:
+            return None
+        center_x = xs[len(xs) // 2]
+        upper_y = min(ys)
+        center_y = upper_y - max(0.10, min(0.28, span_y * 0.38))
+        confidence = min(
+            0.72,
+            sum(self._score(item) for item in visible) / len(visible) * 0.8,
+        )
+        width = max(0.10, min(0.30, max(0.18, span_x * 0.35)))
+        return FaceDetection(
+            center_x=max(-0.25, min(1.25, center_x)),
+            center_y=max(-0.30, min(1.20, center_y)),
+            width=width,
+            height=min(0.40, width * 1.25),
+            confidence=confidence,
+        )
+
+
 class PresenceTracker:
     """Periodically scan for the nearest visible face and turn StackChan toward it."""
 
@@ -113,6 +238,7 @@ class PresenceTracker:
         gateway: StackChanGateway,
         voice_mode: Callable[[], str],
         detector: FaceDetector | None = None,
+        body_head_estimator: BodyHeadEstimator | None = None,
         age_classifier: FaceAgeClassifier | None = None,
         voice_is_speaking: Callable[[], bool] | None = None,
     ) -> None:
@@ -121,6 +247,8 @@ class PresenceTracker:
         self.voice_mode = voice_mode
         self.voice_is_speaking = voice_is_speaking or (lambda: False)
         self._detector = detector
+        self._body_head_estimator = body_head_estimator
+        self._body_head_estimator_attempted = body_head_estimator is not None
         self._age_classifier = age_classifier
         self._age_classifier_attempted = age_classifier is not None
         self._loop_task: asyncio.Task[None] | None = None
@@ -145,6 +273,8 @@ class PresenceTracker:
         self.last_scan_at: datetime | None = None
         self.last_wake_reacquire_at: datetime | None = None
         self.last_wake_reacquire_found: bool | None = None
+        self.body_guidance_count = 0
+        self.last_body_guided_at: datetime | None = None
         self.last_child_face: bool | None = None
         self.last_estimated_age: int | None = None
         self.last_child_identity_confidence: float | None = None
@@ -167,6 +297,12 @@ class PresenceTracker:
             "last_scan_at": self.last_scan_at,
             "last_wake_reacquire_at": self.last_wake_reacquire_at,
             "last_wake_reacquire_found": self.last_wake_reacquire_found,
+            "body_guidance_enabled": (
+                self.settings.presence_body_guidance_enabled
+            ),
+            "body_guidance_available": self._body_head_estimator is not None,
+            "body_guidance_count": self.body_guidance_count,
+            "last_body_guided_at": self.last_body_guided_at,
             "last_child_face": self.last_child_face,
             "last_estimated_age": self.last_estimated_age,
             "last_child_identity_confidence": self.last_child_identity_confidence,
@@ -300,6 +436,22 @@ class PresenceTracker:
                 self.settings.presence_face_model,
                 self.settings.presence_min_confidence,
             )
+        self._ensure_body_head_estimator()
+
+    def _ensure_body_head_estimator(self) -> BodyHeadEstimator | None:
+        if not self.settings.presence_body_guidance_enabled:
+            return None
+        if not self._body_head_estimator_attempted:
+            self._body_head_estimator_attempted = True
+            try:
+                self._body_head_estimator = MediaPipeBodyHeadEstimator(
+                    self.settings.presence_pose_model,
+                    self.settings.presence_pose_min_confidence,
+                )
+            except Exception as exc:
+                logger.warning("body guidance unavailable: %s", exc)
+                self._body_head_estimator = None
+        return self._body_head_estimator
 
     def _ensure_age_classifier(self) -> FaceAgeClassifier | None:
         if not self.settings.child_identity_enabled:
@@ -494,6 +646,8 @@ class PresenceTracker:
         detected_frames: list[
             tuple[FaceDetection, bytes, float, float]
         ] = []
+        body_guidance_used = False
+        body_head_estimator = self._ensure_body_head_estimator()
         await self.gateway.send(MessageType.START_CAMERA_STREAM)
         try:
             for pose_index, (yaw, pitch) in enumerate(search_poses):
@@ -515,10 +669,30 @@ class PresenceTracker:
                 )
                 assert self._detector is not None
                 for frame in frames:
+                    faces = self._detector.detect(frame)
                     detected_frames.extend(
                         (detection, frame, yaw, pitch)
-                        for detection in self._detector.detect(frame)
+                        for detection in faces
                     )
+                    if (
+                        not faces
+                        and not body_guidance_used
+                        and body_head_estimator is not None
+                    ):
+                        head_hints = body_head_estimator.estimate_heads(frame)
+                        if head_hints:
+                            body_guidance_used = True
+                            best_hint = max(
+                                head_hints,
+                                key=lambda item: (
+                                    item.area * item.confidence
+                                ),
+                            )
+                            detected_frames.extend(
+                                await self._confirm_body_guided_face(
+                                    best_hint, yaw, pitch
+                                )
+                            )
                 if detected_frames:
                     break
         finally:
@@ -582,6 +756,39 @@ class PresenceTracker:
         self._record_target(best, scan_yaw, scan_pitch)
         self.mode = "wake_tracking"
         return combined
+
+    async def _confirm_body_guided_face(
+        self,
+        head_hint: FaceDetection,
+        scan_yaw: float,
+        scan_pitch: float,
+    ) -> list[tuple[FaceDetection, bytes, float, float]]:
+        """Move toward an inferred head, then require a real face detection."""
+        target_yaw = self._yaw_for_detection(scan_yaw, head_hint)
+        target_pitch = self._pitch_for_detection(scan_pitch, head_hint)
+        self.mode = "wake_body_guiding"
+        self.body_guidance_count += 1
+        self.last_body_guided_at = datetime.now(timezone.utc)
+        await self._smooth_move(target_yaw, target_pitch)
+        await asyncio.sleep(
+            self.settings.presence_body_guidance_settle_seconds
+        )
+        self.gateway.clear_camera_frames()
+        frames = await self._collect_frames(
+            frame_limit=1,
+            timeout_seconds=(
+                self.settings.presence_wake_search_frame_timeout_seconds
+            ),
+        )
+        assert self._detector is not None
+        confirmed: list[tuple[FaceDetection, bytes, float, float]] = []
+        for frame in frames:
+            confirmed.extend(
+                (face, frame, target_yaw, target_pitch)
+                for face in self._detector.detect(frame)
+            )
+        self.mode = "wake_searching"
+        return confirmed
 
     def _select_tracking_face(
         self, detections: list[FaceDetection]

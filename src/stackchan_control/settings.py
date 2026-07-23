@@ -31,6 +31,12 @@ class Settings:
         PROJECT_ROOT / "var/models/mediapipe/blaze_face_short_range.tflite"
     )
     presence_min_confidence: float = 0.55
+    presence_body_guidance_enabled: bool = True
+    presence_pose_model: Path = (
+        PROJECT_ROOT / "var/models/mediapipe/pose_landmarker_lite.task"
+    )
+    presence_pose_min_confidence: float = 0.45
+    presence_body_guidance_settle_seconds: float = 0.14
     presence_start_delay_seconds: float = 5.0
     presence_scan_interval_seconds: float = 300.0
     presence_tracking_interval_seconds: float = 5.0
@@ -185,6 +191,24 @@ class Settings:
             ),
             presence_min_confidence=float(
                 os.getenv("ROBOT_PRESENCE_MIN_CONFIDENCE", "0.55")
+            ),
+            presence_body_guidance_enabled=os.getenv(
+                "ROBOT_PRESENCE_BODY_GUIDANCE_ENABLED", "true"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            presence_pose_model=project_path(
+                os.getenv(
+                    "ROBOT_PRESENCE_POSE_MODEL",
+                    "var/models/mediapipe/pose_landmarker_lite.task",
+                )
+            ),
+            presence_pose_min_confidence=float(
+                os.getenv("ROBOT_PRESENCE_POSE_MIN_CONFIDENCE", "0.45")
+            ),
+            presence_body_guidance_settle_seconds=float(
+                os.getenv(
+                    "ROBOT_PRESENCE_BODY_GUIDANCE_SETTLE_SECONDS", "0.14"
+                )
             ),
             presence_start_delay_seconds=float(
                 os.getenv("ROBOT_PRESENCE_START_DELAY_SECONDS", "5")

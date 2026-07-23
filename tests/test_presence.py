@@ -39,6 +39,15 @@ class SequenceDetector:
         return next(self.results, [])
 
 
+class SequenceBodyHeadEstimator:
+    def __init__(self, results):
+        self.results = iter(results)
+
+    def estimate_heads(self, jpeg):
+        assert jpeg == b"camera-frame"
+        return next(self.results, [])
+
+
 class FakeChildAgeClassifier:
     def __init__(self, age: int):
         self.age = age
@@ -64,6 +73,7 @@ def settings(tmp_path: Path, **overrides) -> Settings:
         "presence_servo_settle_seconds": 0.0,
         "presence_frame_timeout_seconds": 0.01,
         "presence_camera_horizontal_fov": 60.0,
+        "presence_body_guidance_enabled": False,
     }
     values.update(overrides)
     return Settings(**values)
@@ -296,6 +306,63 @@ def test_wake_reacquire_searches_nearby_pose_before_deferring(
     assert tracker.mode == "wake_tracking"
     assert tracker.last_wake_reacquire_found is True
     assert tracker.snapshot()["current_yaw"] == -18.0
+
+
+def test_wake_reacquire_uses_body_to_preposition_then_confirms_face(
+    tmp_path: Path,
+):
+    gateway = FakeGateway()
+    inferred_head = FaceDetection(0.75, -0.10, 0.18, 0.23, 0.75)
+    confirmed_face = FaceDetection(0.50, 0.45, 0.30, 0.30, 0.9)
+    tracker = PresenceTracker(
+        settings(
+            tmp_path,
+            presence_body_guidance_enabled=True,
+            presence_body_guidance_settle_seconds=0.0,
+            presence_wake_search_yaw_offsets=(),
+            presence_wake_search_pitch_offsets=(),
+        ),
+        gateway,  # type: ignore[arg-type]
+        voice_mode=lambda: "listening",
+        detector=SequenceDetector([[], [confirmed_face]]),
+        body_head_estimator=SequenceBodyHeadEstimator([[inferred_head]]),
+    )
+
+    asyncio.run(tracker.reacquire_after_wake())
+    state = tracker.snapshot()
+
+    assert state["mode"] == "wake_tracking"
+    assert state["last_wake_reacquire_found"] is True
+    assert state["body_guidance_count"] == 1
+    assert state["current_yaw"] == 15.0
+    assert state["current_pitch"] == 34.8
+
+
+def test_body_hint_never_counts_as_a_face_without_confirmation(
+    tmp_path: Path,
+):
+    inferred_head = FaceDetection(0.75, -0.10, 0.18, 0.23, 0.75)
+    tracker = PresenceTracker(
+        settings(
+            tmp_path,
+            presence_body_guidance_enabled=True,
+            presence_body_guidance_settle_seconds=0.0,
+            presence_wake_search_yaw_offsets=(),
+            presence_wake_search_pitch_offsets=(),
+        ),
+        FakeGateway(),  # type: ignore[arg-type]
+        voice_mode=lambda: "listening",
+        detector=SequenceDetector([[], []]),
+        body_head_estimator=SequenceBodyHeadEstimator([[inferred_head]]),
+    )
+
+    asyncio.run(tracker.reacquire_after_wake())
+    state = tracker.snapshot()
+
+    assert state["mode"] == "wake_no_target"
+    assert state["last_wake_reacquire_found"] is False
+    assert state["faces_detected"] == 0
+    assert state["body_guidance_count"] == 1
 
 
 def test_wake_reacquire_confirms_child_only_with_both_modalities(

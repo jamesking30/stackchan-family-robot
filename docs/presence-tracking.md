@@ -18,6 +18,9 @@ StackChan 使用 CoreS3 的 GC0308 摄像头进行本地人员定位。摄像头
 - 正在收音、思考或说话时不扫描。人工舵机命令暂停自动跟踪 60 秒。
 - 检测到唤醒词后，在确认音播放且麦克风暂停期间执行短时二维搜索：
   先检查当前视角，再依次检查左右 `18°/40°` 和上下 `10°` 的位置。
+- 当前视角没有直接检测到人脸、但看见肩膀、上臂、肘部或躯干时，
+  MediaPipe Pose 会根据人体关键点估算头部中心，先把摄像头快速转到候选
+  位置，再重新拍摄并由人脸模型确认。人体推导结果本身不能建立人脸锁定。
 - 找到最近人脸后以不超过约 `6°` 的连续小步平滑居中；进入对话监听后
   每约 2 秒低频校正一次。检测到用户正在说话、机器人思考或回答时暂停
   舵机，避免机械噪声污染收音。
@@ -48,7 +51,8 @@ StackChan 使用 CoreS3 的 GC0308 摄像头进行本地人员定位。摄像头
 ./scripts/setup_child_identity.sh
 ```
 
-脚本下载官方 MediaPipe BlazeFace short-range 模型并校验 SHA-256。
+脚本下载官方 MediaPipe BlazeFace short-range 与 Pose Landmarker Lite
+模型并校验 SHA-256。
 
 ## 控制
 
@@ -67,6 +71,10 @@ robotctl presence scan
 - `ROBOT_PRESENCE_SERVO_SPEED`
 - `ROBOT_PRESENCE_YAW_DIRECTION`
 - `ROBOT_PRESENCE_TARGET_SWITCH_RATIO`
+- `ROBOT_PRESENCE_BODY_GUIDANCE_ENABLED`
+- `ROBOT_PRESENCE_POSE_MODEL`
+- `ROBOT_PRESENCE_POSE_MIN_CONFIDENCE`
+- `ROBOT_PRESENCE_BODY_GUIDANCE_SETTLE_SECONDS`
 - `ROBOT_PRESENCE_WAKE_SEARCH_YAW_OFFSETS`
 - `ROBOT_PRESENCE_WAKE_SEARCH_PITCH_OFFSETS`
 - `ROBOT_CHILD_IDENTITY_ENABLED`

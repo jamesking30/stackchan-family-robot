@@ -246,6 +246,10 @@ def create_app(
             required_paths["presence_face_model"] = (
                 current_settings.presence_face_model
             )
+            if current_settings.presence_body_guidance_enabled:
+                required_paths["presence_pose_model"] = (
+                    current_settings.presence_pose_model
+                )
         if current_settings.child_identity_enabled:
             required_paths["child_identity_age_model"] = (
                 current_settings.child_identity_age_model

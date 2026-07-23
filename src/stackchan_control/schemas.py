@@ -144,6 +144,10 @@ class PresenceStateResponse(BaseModel):
     last_scan_at: datetime | None = None
     last_wake_reacquire_at: datetime | None = None
     last_wake_reacquire_found: bool | None = None
+    body_guidance_enabled: bool = False
+    body_guidance_available: bool = False
+    body_guidance_count: int = 0
+    last_body_guided_at: datetime | None = None
     last_child_face: bool | None = None
     last_estimated_age: int | None = None
     last_child_identity_confidence: float | None = None
