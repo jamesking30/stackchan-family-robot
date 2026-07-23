@@ -281,7 +281,7 @@ def test_local_neural_tts_uses_qwen_serena_and_bounded_tokens(
     assert pcm == b"pcm"
     assert FakeNeuralTtsClient.request_json is not None
     assert FakeNeuralTtsClient.request_json["voice"] == "Vivian"
-    assert FakeNeuralTtsClient.request_json["speed"] == 1.08
+    assert FakeNeuralTtsClient.request_json["speed"] == 0.96
     assert FakeNeuralTtsClient.request_json["lang_code"] == "Chinese"
     assert FakeNeuralTtsClient.request_json["max_tokens"] == 48
 
@@ -322,4 +322,4 @@ def test_gpt_sovits_uses_trained_voice_reference(
     assert FakeGptSovitsClient.request_json["prompt_text"] == (
         "所以你今天就来见我了吗？哇，真令人开心呢。"
     )
-    assert FakeGptSovitsClient.request_json["speed_factor"] == 1.08
+    assert FakeGptSovitsClient.request_json["speed_factor"] == 0.96
